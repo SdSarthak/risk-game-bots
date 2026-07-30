@@ -344,7 +344,8 @@ class PPOTrainer:
     def load_model(cls, path: str, device: torch.device | None = None) -> RiskActorCritic:
         """Load a saved model checkpoint. Returns a RiskActorCritic on DEVICE."""
         dev = device or DEVICE
-        ckpt = torch.load(path, map_location=dev)
+        # Checkpoints hold only tensors and ints, so the safe loader is enough
+        ckpt = torch.load(path, map_location=dev, weights_only=True)
         model = RiskActorCritic(
             obs_size=ckpt["obs_size"],
             action_size=ckpt["action_size"],
@@ -420,7 +421,7 @@ def main() -> None:
     )
 
     if args.checkpoint:
-        ckpt = torch.load(args.checkpoint, map_location=DEVICE)
+        ckpt = torch.load(args.checkpoint, map_location=DEVICE, weights_only=True)
         trainer.total_steps = ckpt.get("total_steps", 0)
         trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
 

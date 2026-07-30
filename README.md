@@ -24,7 +24,7 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-pytest -q                         # 60 tests, ~2 seconds
+pytest                            # 162 tests, ~11 seconds
 python play_game.py --config small_20 --p1 rule_based --p2 random --games 20
 ```
 
@@ -171,13 +171,15 @@ Nothing here is secret — the app needs no credentials.
 ## Tests
 
 ```bash
-pytest -q                      # everything
-pytest tests/test_engine.py -q # rules only
+pytest                      # everything
+pytest tests/test_engine.py # rules, cards and dice
+pytest tests/test_agents.py # agent behaviour and the checkpoint locator
+pytest tests/test_server.py # REST and WebSocket, in-process
 ```
 
 The suite is deterministic and needs no checkpoint, no network and no dataset.
-Tests that would require a trained policy are skipped when `checkpoints/` is
-empty.
+`tests/test_engine.py` runs its board checks against every config in
+`configs/`, so a new board is validated the moment it is added.
 
 ## What is not committed
 

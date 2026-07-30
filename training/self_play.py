@@ -6,6 +6,7 @@ to a single fixed opponent. Player 0 trains; opponents are sampled from the pool
 """
 from __future__ import annotations
 
+import logging
 import pathlib
 import random
 from collections import deque
@@ -17,6 +18,8 @@ from agents.rule_based import RuleBasedAgent
 from training.reward import RewardShaper
 
 CHECKPOINTS_DIR = pathlib.Path(__file__).parent.parent / "checkpoints"
+
+log = logging.getLogger(__name__)
 
 
 class SelfPlayTrainer:
@@ -58,7 +61,9 @@ class SelfPlayTrainer:
             from agents.rl_agent import RLAgent
             path = self._rng.choice(list(self._checkpoint_pool))
             return RLAgent.load(1, path)
-        except (OSError, KeyError, RuntimeError, ValueError):
+        except Exception:  # noqa: BLE001 - torch raises many types for a bad file
+            log.warning("Could not load checkpoint %s; using the baseline opponent",
+                        path, exc_info=True)
             return RuleBasedAgent(1)
 
     def run_episode(self, rl_agent, max_turns: int = 2000) -> dict:
