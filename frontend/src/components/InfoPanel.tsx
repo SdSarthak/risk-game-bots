@@ -1,6 +1,6 @@
 import React from 'react'
 import type { GameStateResponse } from '../api/gameApi'
-import { PLAYER_COLORS } from './Territory'
+import { PLAYER_COLORS, playerColor } from './palette'
 
 interface InfoPanelProps {
   gameState: GameStateResponse
@@ -74,8 +74,10 @@ export function InfoPanel({ gameState }: InfoPanelProps) {
             <span style={{ fontSize: 13, flex: 1 }}>
               P{p.id} {p.is_human ? '(You)' : `(${p.type})`}
             </span>
-            <span style={{ fontSize: 12, color: '#aaa' }}>
-              {p.territory_count}T / {p.troop_count}A
+            <span style={{ fontSize: 12, color: '#aaa' }}
+                  title={`${p.territory_count} territories, ${p.troop_count} armies, `
+                         + `${p.card_count} cards`}>
+              {p.territory_count}T / {p.troop_count}A / {p.card_count}C
             </span>
             {p.eliminated && <span style={{ fontSize: 10, color: '#e74c3c' }}>✗</span>}
           </div>

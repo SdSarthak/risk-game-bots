@@ -1,17 +1,8 @@
 import React, { useMemo } from 'react'
 import type { TerritoryState, GridInfo } from '../api/gameApi'
+import { Territory } from './Territory'
+import { PLAYER_COLORS, playerColor } from './palette'
 
-// Color palette for players (up to 6)
-const PLAYER_COLORS = [
-  '#c0392b', // P0 Red
-  '#2980b9', // P1 Blue
-  '#27ae60', // P2 Green
-  '#d35400', // P3 Orange
-  '#8e44ad', // P4 Purple
-  '#16a085', // P5 Teal
-]
-
-const NEUTRAL_COLOR = '#444'
 const CONTINENT_COLORS: Record<string, string> = {
   NW: '#1a3a2a', NE: '#1a2a3a', SW: '#2a1a3a', SE: '#3a2a1a',
   West: '#1a3a2a', East: '#1a2a3a', North: '#2a1a3a', South: '#3a2a1a',
@@ -131,7 +122,7 @@ function GridBoard({ territories, grid, selectedId, attackSrc, onTerritoryClick,
           const y = cy(t.row)
           const isSelected = t.id === selectedId || t.id === attackSrc
           const isTarget = validTargets.has(t.id) || fortifyTargets.has(t.id)
-          const playerColor = t.owner >= 0 ? PLAYER_COLORS[t.owner % 6] : NEUTRAL_COLOR
+          const fill = playerColor(t.owner)
           const strokeColor = isSelected ? '#ffffff' : isTarget ? '#ffd700' : 'rgba(255,255,255,0.2)'
           const strokeWidth = isSelected || isTarget ? 3 : 1.5
           const pulseRing = isTarget
@@ -141,7 +132,10 @@ function GridBoard({ territories, grid, selectedId, attackSrc, onTerritoryClick,
               key={t.id}
               onClick={() => onTerritoryClick(t.id)}
               style={{ cursor: 'pointer' }}
+              role="button"
+              aria-label={`${t.name}: ${t.troops} troops`}
             >
+              <title>{`${t.name} (${t.continent}) — ${t.troops} troops`}</title>
               {/* Pulse ring for valid targets */}
               {pulseRing && (
                 <circle
@@ -156,7 +150,7 @@ function GridBoard({ territories, grid, selectedId, attackSrc, onTerritoryClick,
               {/* Main territory circle */}
               <circle
                 cx={x} cy={y} r={RADIUS}
-                fill={playerColor}
+                fill={fill}
                 stroke={strokeColor}
                 strokeWidth={strokeWidth}
                 opacity={t.owner < 0 ? 0.35 : 1}
@@ -221,19 +215,29 @@ function computeAutoLayout(territories: TerritoryState[]): Record<number, { x: n
 
 function AutoLayoutBoard({ territories, selectedId, attackSrc, onTerritoryClick,
                             currentPlayer, phase }: Omit<BoardProps, 'grid'>) {
-  const layout = useMemo(() => computeAutoLayout(territories), [territories.length])
+  const layout = useMemo(() => computeAutoLayout(territories),
+                         [territories.length])
   const byId = useMemo(() => {
     const m: Record<number, TerritoryState> = {}
     territories.forEach(t => { m[t.id] = t })
     return m
   }, [territories])
 
-  const validTargets = useMemo(() => {
-    if (phase !== 'ATTACK' || attackSrc === null) return new Set<number>()
-    const src = byId[attackSrc]
+  // Highlight whatever the current selection can actually reach this phase
+  const highlighted = useMemo(() => {
+    const anchor = phase === 'ATTACK' ? attackSrc : selectedId
+    if (anchor === null) return new Set<number>()
+    const src = byId[anchor]
     if (!src || src.owner !== currentPlayer) return new Set<number>()
-    return new Set(src.adjacent.filter(id => byId[id]?.owner !== currentPlayer))
-  }, [phase, attackSrc, byId, currentPlayer])
+    if (phase === 'ATTACK') {
+      return new Set(src.adjacent.filter(id => byId[id]?.owner !== currentPlayer))
+    }
+    if (phase === 'FORTIFY') {
+      return new Set(src.adjacent.filter(
+        id => id !== anchor && byId[id]?.owner === currentPlayer))
+    }
+    return new Set<number>()
+  }, [phase, attackSrc, selectedId, byId, currentPlayer])
 
   const W = 800, H = 600
 
@@ -256,23 +260,16 @@ function AutoLayoutBoard({ territories, selectedId, attackSrc, onTerritoryClick,
         {territories.map(t => {
           const pos = layout[t.id]
           if (!pos) return null
-          const isSelected = t.id === selectedId || t.id === attackSrc
-          const isTarget = validTargets.has(t.id)
-          const color = t.owner >= 0 ? PLAYER_COLORS[t.owner % 6] : NEUTRAL_COLOR
           return (
-            <g key={t.id} onClick={() => onTerritoryClick(t.id)} style={{ cursor: 'pointer' }}>
-              <circle cx={pos.x} cy={pos.y} r={28}
-                fill={color}
-                stroke={isSelected ? '#fff' : isTarget ? '#ffd700' : 'rgba(255,255,255,0.3)'}
-                strokeWidth={isSelected || isTarget ? 3 : 1.5}
-                opacity={t.owner < 0 ? 0.4 : 0.9}
-              />
-              <text x={pos.x} y={pos.y} textAnchor="middle" dominantBaseline="central"
-                fill="#fff" fontSize={14} fontWeight="bold"
-                style={{ userSelect: 'none', pointerEvents: 'none' }}>
-                {t.troops}
-              </text>
-            </g>
+            <Territory
+              key={t.id}
+              territory={t}
+              x={pos.x}
+              y={pos.y}
+              isSelected={t.id === selectedId || t.id === attackSrc}
+              isHighlighted={highlighted.has(t.id)}
+              onClick={onTerritoryClick}
+            />
           )
         })}
       </svg>

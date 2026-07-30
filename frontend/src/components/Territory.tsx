@@ -1,17 +1,6 @@
 import React from 'react'
 import type { TerritoryState } from '../api/gameApi'
-
-// Color palette for players (up to 6)
-const PLAYER_COLORS = [
-  '#e74c3c', // P0 Red
-  '#3498db', // P1 Blue
-  '#2ecc71', // P2 Green
-  '#f39c12', // P3 Orange
-  '#9b59b6', // P4 Purple
-  '#1abc9c', // P5 Teal
-]
-
-const NEUTRAL_COLOR = '#555'
+import { playerColor } from './palette'
 
 interface TerritoryProps {
   territory: TerritoryState
@@ -25,7 +14,7 @@ interface TerritoryProps {
 
 export function Territory({ territory, x, y, radius = 28, isSelected,
                              isHighlighted, onClick }: TerritoryProps) {
-  const color = territory.owner >= 0 ? PLAYER_COLORS[territory.owner % 6] : NEUTRAL_COLOR
+  const color = playerColor(territory.owner)
   const borderColor = isSelected ? '#fff' : isHighlighted ? '#ffd700' : 'rgba(255,255,255,0.3)'
   const borderWidth = isSelected || isHighlighted ? 3 : 1.5
 
@@ -67,5 +56,3 @@ export function Territory({ territory, x, y, radius = 28, isSelected,
     </g>
   )
 }
-
-export { PLAYER_COLORS }
