@@ -24,15 +24,19 @@ from agents.mcts import MCTSAgent
 
 CONFIGS_DIR = pathlib.Path(__file__).parent / "configs"
 DEFAULT_MAX_STEPS = 50_000
+DEFAULT_MCTS_SIMS = 30
 
 
-def load_agents(rl_checkpoint: pathlib.Path | None, include_mcts: bool) -> dict:
+def load_agents(rl_checkpoint: pathlib.Path | None, include_mcts: bool,
+                mcts_sims: int = DEFAULT_MCTS_SIMS) -> dict:
     agents = {
         "random":     lambda pid: RandomAgent(pid),
         "rule_based": lambda pid: RuleBasedAgent(pid),
     }
     if include_mcts:
-        agents["mcts"] = lambda pid: MCTSAgent(pid, time_limit=0.5)
+        # A simulation budget, not a wall-clock one: a benchmark has to finish,
+        # and half a second per decision runs to hours over a full round-robin.
+        agents["mcts"] = lambda pid: MCTSAgent(pid, num_simulations=mcts_sims)
     if rl_checkpoint is not None:
         from agents.rl_agent import RLAgent
         path = str(rl_checkpoint)
@@ -89,6 +93,8 @@ def main():
     parser.add_argument("--games", type=int, default=20,
                         help="Games per matchup (split evenly as P0/P1)")
     parser.add_argument("--no-mcts", action="store_true", help="Skip MCTS (slow)")
+    parser.add_argument("--mcts-sims", type=int, default=DEFAULT_MCTS_SIMS,
+                        help="Rollouts MCTS runs per decision")
     parser.add_argument("--no-rl",   action="store_true", help="Skip RL agent")
     parser.add_argument("--checkpoint", default=None,
                         help="RL checkpoint to benchmark (default: newest under checkpoints/)")
@@ -112,7 +118,8 @@ def main():
             print("Train first with: python training/run_training.py --config small_20\n")
             rl_checkpoint = None
 
-    agents = load_agents(rl_checkpoint=rl_checkpoint, include_mcts=not args.no_mcts)
+    agents = load_agents(rl_checkpoint=rl_checkpoint, include_mcts=not args.no_mcts,
+                         mcts_sims=args.mcts_sims)
     names = list(agents.keys())
 
     print(f"Board:   {board.name}")

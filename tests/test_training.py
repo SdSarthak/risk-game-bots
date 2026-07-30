@@ -89,12 +89,17 @@ class TestRiskEnv:
         obs, _ = env.reset(seed=0)
         assert np.all(np.isfinite(obs["obs"]))
 
-    def test_mask_marks_exactly_the_legal_actions(self, env):
+    def test_mask_matches_what_the_encoder_can_express(self, env):
         obs, _ = env.reset(seed=0)
-        expected = min(len(env.legal_actions()), MAX_LEGAL_ACTIONS)
-        assert obs["action_mask"].sum() == expected
-        assert obs["action_mask"][:expected].all()
-        assert not obs["action_mask"][expected:].any()
+        assert obs["action_mask"].shape == (MAX_LEGAL_ACTIONS,)
+        assert obs["action_mask"].sum() == len(env.legal_actions())
+        assert obs["action_mask"].any(), "the policy must always have a move"
+
+    def test_masked_indices_decode_to_engine_legal_actions(self, env, small_board):
+        env.reset(seed=0)
+        engine_legal = RulesEngine(small_board, num_players=2).legal_actions(env._state)
+        for action in env.legal_actions():
+            assert action in engine_legal
 
     def test_agent_always_acts_on_its_own_turn(self, env):
         env.reset(seed=0)
@@ -164,9 +169,20 @@ class TestSelfPlayTrainer:
         assert stats["won"] == (stats["winner"] == 0)
 
 
-def test_engine_and_env_agree_on_legal_actions(small_board):
-    """The env must hand the policy exactly what the engine considers legal."""
+def test_env_never_plays_an_action_the_engine_rejects(small_board):
+    """
+    The encoder covers a subset of the rules, so it must never widen them: every
+    action the env plays has to be one the engine would have offered.
+    """
     env = RiskEnv(config_name="small_20", num_players=2)
     env.reset(seed=5)
     engine = RulesEngine(small_board, num_players=2)
-    assert env.legal_actions() == engine.legal_actions(env._state)
+    for _ in range(200):
+        legal = engine.legal_actions(env._state)
+        # Even an out-of-range output must resolve to something legal
+        assert env._resolve_action(MAX_LEGAL_ACTIONS + 5) in legal
+        chosen = int(np.flatnonzero(env.action_mask())[0])
+        assert env._resolve_action(chosen) in legal
+        _, _, terminated, truncated, _ = env.step(chosen)
+        if terminated or truncated:
+            break

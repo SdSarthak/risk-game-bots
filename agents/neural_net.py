@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from agents.action_space import ACTION_SPACE_SIZE
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MAX_LEGAL_ACTIONS = 500   # must match gym_env.py
+# One logit per slot in the fixed action layout (see agents/action_space.py)
+MAX_LEGAL_ACTIONS = ACTION_SPACE_SIZE
 
 
 class RiskActorCritic(nn.Module):
@@ -79,9 +81,12 @@ class RiskActorCritic(nn.Module):
         """
         h = self.trunk(obs)
         logits = self.actor(h)                          # (B, action_size)
-        # Mask: set logit of illegal actions to a large negative number
         mask_bool = action_mask.bool()
-        logits = logits.masked_fill(~mask_bool, -1e9)
+        # A row with nothing legal would give Categorical a row of -inf and make
+        # it emit NaNs; fall back to uniform so a bad mask cannot poison a batch.
+        empty_rows = ~mask_bool.any(dim=-1, keepdim=True)
+        mask_bool = mask_bool | empty_rows
+        logits = logits.masked_fill(~mask_bool, torch.finfo(logits.dtype).min)
         dist = torch.distributions.Categorical(logits=logits)
         value = self.critic(h).squeeze(-1)              # (B,)
         return dist, value

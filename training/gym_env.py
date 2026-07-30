@@ -5,13 +5,11 @@ The RL agent plays as player 0. All other players are controlled by opponent
 agents (default: RuleBasedAgent). The environment steps through the entire
 game turn, including all opponent moves, before returning control to the RL agent.
 
-Observation:  flat float32 vector (see GameState.to_observation)
-Action space: Discrete(num_actions) — index into the sorted legal action list.
-              The legal action mapping changes each step, so the policy must
-              learn to condition on both observation and action index.
-
-Note: Because legal actions change every step, we use a Dict action space
-with a fixed-size action mask so the policy can handle variable legal sets.
+Observation:  Dict of the flat state vector (see GameState.to_observation) and a
+              binary mask over the action space.
+Action space: Discrete over the fixed layout in agents/action_space.py, where a
+              given index always names the same move on the same board. Illegal
+              indices are masked out rather than remapped.
 """
 from __future__ import annotations
 
@@ -29,11 +27,12 @@ except ImportError:
 from engine.board import BoardConfig
 from engine.rules import Action, RulesEngine
 from engine.state import GameState
+from agents.action_space import ACTION_SPACE_SIZE, RiskActionSpace
 from agents.rule_based import RuleBasedAgent
 from training.reward import RewardShaper
 
 CONFIGS_DIR = pathlib.Path(__file__).parent.parent / "configs"
-MAX_LEGAL_ACTIONS = 500  # Upper bound on legal actions per step
+MAX_LEGAL_ACTIONS = ACTION_SPACE_SIZE
 
 # Stand-offs between cautious policies can run indefinitely; truncate them so a
 # single episode can never stall a training run.
@@ -66,6 +65,7 @@ class RiskEnv(gym.Env):
         self.num_players = num_players
         self.max_episode_steps = max_episode_steps
         self.render_mode = render_mode
+        self.action_encoder = RiskActionSpace(self.board)
         self._elapsed_steps = 0
 
         # Opponent factory
@@ -79,7 +79,7 @@ class RiskEnv(gym.Env):
         # Internal state (initialized in reset)
         self._state: GameState | None = None
         self._engine: RulesEngine | None = None
-        self._legal_actions: list[Action] = []
+        self._mask: np.ndarray = np.zeros(ACTION_SPACE_SIZE, dtype=np.int8)
 
         # Spaces
         dummy_state = GameState.new_game(self.board, num_players, seed=0)
@@ -102,7 +102,7 @@ class RiskEnv(gym.Env):
 
         # Advance past any initial opponent turns before player 0's first turn
         self._state = self._run_opponents_until_our_turn()
-        self._legal_actions = self._engine.legal_actions(self._state)
+        self._mask = self.action_encoder.legal_mask(self._state)
         self._shaper.reset(self._state)
         self._elapsed_steps = 0
 
@@ -111,14 +111,8 @@ class RiskEnv(gym.Env):
     def step(self, action_idx: int):
         if self._state is None:
             raise RuntimeError("Call reset() before step()")
-        if not self._legal_actions:
-            raise RuntimeError("No legal actions available; the episode is over")
 
-        # The mask only marks the first len(legal) indices, but clamp anyway so a
-        # policy that ignores the mask still produces a playable action.
-        action_idx = int(np.clip(action_idx, 0, len(self._legal_actions) - 1))
-        action = self._legal_actions[action_idx]
-
+        action = self._resolve_action(int(action_idx))
         self._state = self._engine.apply_action(self._state, action)
         self._elapsed_steps += 1
 
@@ -136,7 +130,7 @@ class RiskEnv(gym.Env):
 
         reward = self._shaper.step(self._state, win=win, eliminated=eliminated)
 
-        self._legal_actions = self._engine.legal_actions(self._state)
+        self._mask = self.action_encoder.legal_mask(self._state)
         truncated = not terminated and self._elapsed_steps >= self.max_episode_steps
         obs = self._get_obs()
 
@@ -144,6 +138,24 @@ class RiskEnv(gym.Env):
             self.render()
 
         return obs, reward, terminated, truncated, {}
+
+    def _resolve_action(self, action_idx: int) -> Action:
+        """
+        Decode a policy output into a legal engine action.
+
+        A masked policy always lands on something playable; anything else falls
+        back to the first legal index so a stray output cannot wedge the episode.
+        """
+        action = self.action_encoder.decode(action_idx, self._state)
+        if action is not None:
+            return action
+        legal_indices = np.flatnonzero(self._mask)
+        for index in legal_indices:
+            fallback = self.action_encoder.decode(int(index), self._state)
+            if fallback is not None:
+                return fallback
+        # Ending the phase is legal in every state the engine can reach
+        return Action(phase=self._state.phase, troops=-1)
 
     def render(self):
         if self._state is not None:
@@ -162,11 +174,14 @@ class RiskEnv(gym.Env):
         return state
 
     def _get_obs(self) -> dict:
-        obs = self._state.to_observation()
-        mask = np.zeros(MAX_LEGAL_ACTIONS, dtype=np.int8)
-        for i in range(min(len(self._legal_actions), MAX_LEGAL_ACTIONS)):
-            mask[i] = 1
-        return {"obs": obs, "action_mask": mask}
+        return {"obs": self._state.to_observation(), "action_mask": self._mask.copy()}
+
+    def action_mask(self) -> np.ndarray:
+        """Current binary mask over the fixed action space."""
+        return self._mask.copy()
 
     def legal_actions(self) -> list[Action]:
-        return self._legal_actions
+        """The actions the encoder can currently express, in index order."""
+        decoded = (self.action_encoder.decode(int(i), self._state)
+                   for i in np.flatnonzero(self._mask))
+        return [a for a in decoded if a is not None]

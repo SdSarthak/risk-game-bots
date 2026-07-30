@@ -23,11 +23,12 @@ from agents.mcts import MCTSAgent
 CONFIGS_DIR = pathlib.Path(__file__).parent / "configs"
 
 DEFAULT_MAX_STEPS = 50_000
+DEFAULT_MCTS_SIMS = 30   # rollouts per decision; a wall-clock budget makes runs unbounded
 
 AGENT_TYPES = {
     "random": lambda pid: RandomAgent(pid),
     "rule_based": lambda pid: RuleBasedAgent(pid),
-    "mcts": lambda pid: MCTSAgent(pid, time_limit=1.0),
+    "mcts": lambda pid: MCTSAgent(pid, num_simulations=DEFAULT_MCTS_SIMS),
     "rl": lambda pid: _load_rl_agent(pid),
 }
 
