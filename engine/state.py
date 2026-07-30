@@ -27,12 +27,10 @@ class GameState:
     # Turn tracking
     current_player: int = 0
     phase: Phase = Phase.DRAFT
+    turn_number: int = 0     # complete player turns taken so far
 
     # Draft state
     troops_to_place: int = 0
-
-    # Attack state
-    attack_src: int = -1     # -1 means no attack in progress
 
     # Cards
     cards: list[list[CardType]] = field(default_factory=list)  # cards[player] = list of CardType
@@ -46,18 +44,50 @@ class GameState:
 
     @classmethod
     def new_game(cls, board: BoardConfig, num_players: int, seed: int | None = None) -> "GameState":
-        """Initialize a new game with territories randomly distributed."""
-        rng = np.random.default_rng(seed)
+        """
+        Initialize a new game.
+
+        Territories are dealt out evenly at random, each starting with one army.
+        Every player's remaining starting armies (see :meth:`initial_troops`) are
+        then scattered at random across the territories they hold, which is the
+        standard Risk opening after both deal and placement are complete.
+        Player 0 begins in the DRAFT phase with a normal reinforcement allotment.
+        """
+        if not 2 <= num_players <= MAX_PLAYERS:
+            raise ValueError(f"num_players must be between 2 and {MAX_PLAYERS}, got {num_players}")
+        if num_players > board.max_players:
+            raise ValueError(
+                f"Board '{board.name}' supports at most {board.max_players} players"
+            )
         n = board.num_territories
+        if n < num_players:
+            raise ValueError(
+                f"Board '{board.name}' has {n} territories, too few for {num_players} players"
+            )
+
+        rng = np.random.default_rng(seed)
         owners = [-1] * n
         troops = [0] * n
 
-        # Distribute territories randomly
+        # Deal territories out evenly at random
         territory_ids = list(range(n))
         rng.shuffle(territory_ids)
+        owned: list[list[int]] = [[] for _ in range(num_players)]
         for i, tid in enumerate(territory_ids):
-            owners[tid] = i % num_players
-            troops[tid] = 1  # Start with 1 troop each
+            player = i % num_players
+            owners[tid] = player
+            troops[tid] = 1  # Every territory is garrisoned by at least one army
+            owned[player].append(tid)
+
+        # Scatter each player's remaining starting armies over their territories
+        allotment = cls.initial_troops(num_players)
+        for player, tids in enumerate(owned):
+            remaining = allotment - len(tids)
+            if remaining <= 0:
+                continue
+            picks = rng.integers(0, len(tids), size=remaining)
+            for pick in picks:
+                troops[tids[int(pick)]] += 1
 
         state = cls(
             board=board,
@@ -66,23 +96,28 @@ class GameState:
             troops=troops,
             current_player=0,
             phase=Phase.DRAFT,
-            troops_to_place=0,  # computed below after state exists
+            troops_to_place=0,  # computed below, once the state exists
             cards=[[] for _ in range(num_players)],
             eliminated=[False] * num_players,
         )
-        # Use same reinforcement formula as every other turn
-        state.troops_to_place = max(3, len(state.territories_of(0)) // 3) + sum(
-            bonus for continent, bonus in board.continent_bonuses.items()
-            if state.controls_continent(0, continent)
-        )
+        state.troops_to_place = state.reinforcements_for(0)
         return state
 
     @staticmethod
-    def _initial_troops(num_players: int) -> int:
-        """Standard Risk starting armies minus 1 per territory (territories already have 1)."""
+    def initial_troops(num_players: int) -> int:
+        """Standard Risk starting armies per player, including the one on each territory."""
         starting = {2: 40, 3: 35, 4: 30, 5: 25, 6: 20}
-        base = starting.get(num_players, 20)
-        return base  # Full draft allotment; rules engine handles subtracting placed troops
+        return starting.get(num_players, 20)
+
+    def reinforcements_for(self, player: int) -> int:
+        """Reinforcements a player draws at the start of their draft phase."""
+        territory_bonus = max(3, len(self.territories_of(player)) // 3)
+        continent_bonus = sum(
+            bonus
+            for continent, bonus in self.board.continent_bonuses.items()
+            if self.controls_continent(player, continent)
+        )
+        return territory_bonus + continent_bonus
 
     def copy(self) -> "GameState":
         s = copy.copy(self)
@@ -94,10 +129,14 @@ class GameState:
 
     def to_observation(self) -> np.ndarray:
         """
-        Flat float32 observation vector for RL.
+        Flat float32 observation vector for RL, from the current player's view.
         Layout (fixed MAX_TERRITORIES padding):
           [owner_norm_0..N, troops_norm_0..N, current_player_norm,
-           phase_onehot(3), cards_onehot(MAX_PLAYERS * MAX_CARDS_PER_PLAYER)]
+           phase_onehot(3), card_slots(MAX_PLAYERS * MAX_CARDS_PER_PLAYER)]
+
+        The card block reserves one slot per card the current player could hold;
+        each occupied slot carries the card type scaled to [0, 1]. The block is
+        oversized so the layout stays fixed as hand limits change.
         """
         n = MAX_TERRITORIES
         obs = np.zeros(n * 2 + 1 + 3 + MAX_PLAYERS * MAX_CARDS_PER_PLAYER, dtype=np.float32)

@@ -23,34 +23,32 @@ from agents.rule_based import RuleBasedAgent
 from agents.mcts import MCTSAgent
 
 CONFIGS_DIR = pathlib.Path(__file__).parent / "configs"
-CHECKPOINTS_DIR = pathlib.Path(__file__).parent / "checkpoints"
+DEFAULT_MAX_STEPS = 50_000
 
 
-def load_agents(include_rl: bool, include_mcts: bool) -> dict:
+def load_agents(rl_checkpoint: pathlib.Path | None, include_mcts: bool) -> dict:
     agents = {
         "random":     lambda pid: RandomAgent(pid),
         "rule_based": lambda pid: RuleBasedAgent(pid),
     }
     if include_mcts:
         agents["mcts"] = lambda pid: MCTSAgent(pid, time_limit=0.5)
-    if include_rl:
+    if rl_checkpoint is not None:
         from agents.rl_agent import RLAgent
-        best = CHECKPOINTS_DIR / "best" / "best_model.zip"
-        final = CHECKPOINTS_DIR / "risk_ppo_final_500000"
-        path = str(best) if best.exists() else str(final)
+        path = str(rl_checkpoint)
         agents["rl"] = lambda pid, p=path: RLAgent.load(pid, p)
     return agents
 
 
-def run_game(board, agents_list, seed, max_turns=2000):
+def run_game(board, agents_list, seed, max_steps=DEFAULT_MAX_STEPS):
+    """Play one game and return the winner id (None if the step budget ran out)."""
     state = GameState.new_game(board, num_players=len(agents_list), seed=seed)
     engine = RulesEngine(board, num_players=len(agents_list), seed=seed)
-    state.troops_to_place = engine._calculate_reinforcements(state, state.current_player)
 
     for agent in agents_list:
         agent.reset()
 
-    for _ in range(max_turns):
+    for _ in range(max_steps):
         if engine.is_terminal(state):
             break
         legal = engine.legal_actions(state)
@@ -62,19 +60,20 @@ def run_game(board, agents_list, seed, max_turns=2000):
     return engine.winner(state)
 
 
-def run_matchup(board, name_a, factory_a, name_b, factory_b, games, seed_offset):
+def run_matchup(board, name_a, factory_a, name_b, factory_b, games, seed_offset,
+                max_steps=DEFAULT_MAX_STEPS):
     wins = {name_a: 0, name_b: 0, "draw": 0}
     # Play half as P0, half as P1 to cancel positional bias
     half = games // 2
     for g in range(half):
         agents = [factory_a(0), factory_b(1)]
-        w = run_game(board, agents, seed=seed_offset + g)
+        w = run_game(board, agents, seed=seed_offset + g, max_steps=max_steps)
         if w == 0:     wins[name_a] += 1
         elif w == 1:   wins[name_b] += 1
         else:          wins["draw"] += 1
     for g in range(games - half):
         agents = [factory_b(0), factory_a(1)]
-        w = run_game(board, agents, seed=seed_offset + half + g)
+        w = run_game(board, agents, seed=seed_offset + half + g, max_steps=max_steps)
         if w == 1:     wins[name_a] += 1
         elif w == 0:   wins[name_b] += 1
         else:          wins["draw"] += 1
@@ -82,30 +81,38 @@ def run_matchup(board, name_a, factory_a, name_b, factory_b, games, seed_offset)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="small_20")
+    parser = argparse.ArgumentParser(
+        description="Round-robin all agents against each other and print a leaderboard."
+    )
+    parser.add_argument("--config", default="small_20",
+                        choices=sorted(p.stem for p in CONFIGS_DIR.glob("*.json")))
     parser.add_argument("--games", type=int, default=20,
                         help="Games per matchup (split evenly as P0/P1)")
     parser.add_argument("--no-mcts", action="store_true", help="Skip MCTS (slow)")
     parser.add_argument("--no-rl",   action="store_true", help="Skip RL agent")
+    parser.add_argument("--checkpoint", default=None,
+                        help="RL checkpoint to benchmark (default: newest under checkpoints/)")
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
+                        help="Max agent decisions per game before scoring it a draw")
     args = parser.parse_args()
 
+    if args.games < 2:
+        print("--games must be at least 2 so each agent plays both seats")
+        sys.exit(1)
+
     board = BoardConfig.load(str(CONFIGS_DIR / f"{args.config}.json"))
-    include_rl = not args.no_rl
 
-    # Check if RL checkpoint exists
-    best = CHECKPOINTS_DIR / "best" / "best_model.zip"
-    final = CHECKPOINTS_DIR / "risk_ppo_final_500000.zip"
-    final_no_ext = CHECKPOINTS_DIR / "risk_ppo_final_500000"
-    rl_available = best.exists() or final.exists() or final_no_ext.exists()
-    if include_rl and not rl_available:
-        print("No RL checkpoint found — skipping RL agent.")
-        print("Train first with: python training/run_training.py --config small_20\n")
-        include_rl = False
+    rl_checkpoint = None
+    if not args.no_rl:
+        from agents.checkpoints import find_latest_checkpoint
+        rl_checkpoint = (pathlib.Path(args.checkpoint) if args.checkpoint
+                         else find_latest_checkpoint())
+        if rl_checkpoint is None or not rl_checkpoint.exists():
+            print("No RL checkpoint found — skipping RL agent.")
+            print("Train first with: python training/run_training.py --config small_20\n")
+            rl_checkpoint = None
 
-    include_mcts = not args.no_mcts
-
-    agents = load_agents(include_rl=include_rl, include_mcts=include_mcts)
+    agents = load_agents(rl_checkpoint=rl_checkpoint, include_mcts=not args.no_mcts)
     names = list(agents.keys())
 
     print(f"Board:   {board.name}")
@@ -126,7 +133,8 @@ def main():
         print(f"[{idx+1}/{total_matchups}] {a} vs {b} ... ", end="", flush=True)
         t0 = time.time()
         result = run_matchup(board, a, agents[a], b, agents[b],
-                             games=args.games, seed_offset=idx * 1000)
+                             games=args.games, seed_offset=idx * 1000,
+                             max_steps=args.max_steps)
         elapsed = time.time() - t0
 
         wa, wb = result[a], result[b]

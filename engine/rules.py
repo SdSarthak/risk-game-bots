@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from engine.board import BoardConfig
 from engine.cards import CardDeck
 from engine.constants import (
+    CARDS_PER_SET,
     MAX_ATTACK_DICE,
+    MAX_CARDS_IN_HAND,
     MAX_DEFEND_DICE,
     MIN_TROOPS,
     MIN_TROOPS_TO_ATTACK,
@@ -37,11 +39,23 @@ class Action:
 
 
 class RulesEngine:
-    def __init__(self, board: BoardConfig, num_players: int, seed: int | None = None):
+    """
+    Applies Risk rules to a :class:`GameState`.
+
+    Card sets are traded automatically at the start of each draft phase: the
+    engine cashes in every set the player holds when ``eager_card_trades`` is
+    True (the default), and otherwise only cashes in the minimum needed to get
+    back under the five-card hand limit. Agents therefore never have to emit
+    trade actions, and the escalating trade bonus still drives the late game.
+    """
+
+    def __init__(self, board: BoardConfig, num_players: int, seed: int | None = None,
+                 eager_card_trades: bool = True):
         self.board = board
         self.num_players = num_players
         self._rng = random.Random(seed)
         self.deck = CardDeck(board.num_territories, seed=seed)
+        self.eager_card_trades = eager_card_trades
 
     # ------------------------------------------------------------------
     # Legal action generation
@@ -182,17 +196,66 @@ class RulesEngine:
         next_idx = (idx + 1) % len(active)
         s.current_player = active[next_idx]
         s.phase = Phase.DRAFT
+        s.turn_number += 1
         s.conquered_this_turn = False
-        s.troops_to_place = self._calculate_reinforcements(s, s.current_player)
+        s.troops_to_place = self.calculate_reinforcements(s, s.current_player)
+        self.auto_trade_cards(s, s.current_player)
 
-    def _calculate_reinforcements(self, s: GameState, player: int) -> int:
-        territory_bonus = max(3, len(s.territories_of(player)) // 3)
-        continent_bonus = sum(
-            bonus
-            for continent, bonus in self.board.continent_bonuses.items()
-            if s.controls_continent(player, continent)
-        )
-        return territory_bonus + continent_bonus
+    def calculate_reinforcements(self, s: GameState, player: int) -> int:
+        """Troops a player receives at the start of their draft phase."""
+        return s.reinforcements_for(player)
+
+    # ------------------------------------------------------------------
+    # Cards
+    # ------------------------------------------------------------------
+
+    def auto_trade_cards(self, s: GameState, player: int) -> int:
+        """
+        Cash in card sets for the player, mutating ``s`` in place.
+
+        Trades every available set when ``eager_card_trades`` is set, otherwise
+        only enough sets to bring the hand back under the five-card limit.
+        Returns the total bonus troops added to ``s.troops_to_place``.
+        """
+        total_bonus = 0
+        while True:
+            hand = s.cards[player]
+            forced = len(hand) > MAX_CARDS_IN_HAND
+            if not forced and not self.eager_card_trades:
+                break
+            if len(hand) < CARDS_PER_SET:
+                break
+            indices = CardDeck.find_valid_set(hand)
+            if indices is None:
+                break
+            total_bonus += self._trade_set(s, player, indices)
+        return total_bonus
+
+    def _trade_set(self, s: GameState, player: int, card_indices: list[int]) -> int:
+        """Remove a set from the player's hand and grant the trade bonus."""
+        hand = s.cards[player]
+        if len(card_indices) != CARDS_PER_SET:
+            raise ValueError(f"A trade needs exactly {CARDS_PER_SET} cards")
+        if len(set(card_indices)) != CARDS_PER_SET:
+            raise ValueError("Card indices must be distinct")
+        if any(not 0 <= i < len(hand) for i in card_indices):
+            raise ValueError(f"Card index out of range for a hand of {len(hand)}")
+
+        traded = [hand[i] for i in card_indices]
+        for i in sorted(card_indices, reverse=True):
+            hand.pop(i)
+        self.deck.discard(traded)
+
+        bonus = CardDeck.bonus_for_trade(s.card_trade_count)
+        s.card_trade_count += 1
+        s.troops_to_place += bonus
+        return bonus
+
+    def trade_cards(self, state: GameState, card_indices: list[int]) -> GameState:
+        """Trade one set of 3 cards for the current escalating bonus. Returns a new state."""
+        s = state.copy()
+        self._trade_set(s, s.current_player, card_indices)
+        return s
 
     # ------------------------------------------------------------------
     # Dice simulation
@@ -229,20 +292,3 @@ class RulesEngine:
         if len(active) == 1:
             return active[0]
         return None
-
-    # ------------------------------------------------------------------
-    # Card trade (call before calculating draft reinforcements)
-    # ------------------------------------------------------------------
-
-    def trade_cards(self, state: GameState, card_indices: list[int]) -> GameState:
-        """Trade 3 cards for reinforcement bonus. Returns new state."""
-        s = state.copy()
-        player = s.current_player
-        traded = [s.cards[player][i] for i in sorted(card_indices, reverse=True)]
-        for i in sorted(card_indices, reverse=True):
-            s.cards[player].pop(i)
-        self.deck.discard(traded)
-        bonus = CardDeck.bonus_for_trade(s.card_trade_count)
-        s.card_trade_count += 1
-        s.troops_to_place += bonus
-        return s

@@ -22,7 +22,7 @@ from agents.mcts import MCTSAgent
 
 CONFIGS_DIR = pathlib.Path(__file__).parent / "configs"
 
-CHECKPOINTS_DIR = pathlib.Path(__file__).parent / "checkpoints"
+DEFAULT_MAX_STEPS = 50_000
 
 AGENT_TYPES = {
     "random": lambda pid: RandomAgent(pid),
@@ -33,20 +33,20 @@ AGENT_TYPES = {
 
 
 def _load_rl_agent(player_id: int):
+    from agents.checkpoints import find_latest_checkpoint
     from agents.rl_agent import RLAgent
-    # Find the best model if available, otherwise the final
-    best = CHECKPOINTS_DIR / "best" / "best_model.zip"
-    final = CHECKPOINTS_DIR / "risk_ppo_final_500000.zip"
-    # SB3 appends .zip automatically, check both
-    if best.exists():
-        path = str(best)
-    elif final.exists():
-        path = str(final)
-    else:
-        # Try without .zip suffix (SB3 adds it on load)
-        path = str(CHECKPOINTS_DIR / "risk_ppo_final_500000")
+    path = find_latest_checkpoint()
+    if path is None:
+        print("No trained RL checkpoint found under checkpoints/.")
+        print("Train one first: python training/run_training.py --config small_20")
+        sys.exit(1)
     print(f"  Loading RL model from: {path}")
-    return RLAgent.load(player_id, path)
+    return RLAgent.load(player_id, str(path))
+
+
+def available_configs() -> list[str]:
+    """Board config names discoverable under configs/."""
+    return sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
 
 
 def build_agent(agent_type: str, player_id: int) -> BaseAgent:
@@ -57,9 +57,13 @@ def build_agent(agent_type: str, player_id: int) -> BaseAgent:
 
 
 def run_game(board: BoardConfig, agents: list[BaseAgent], seed: int,
-             verbose: bool = False, max_turns: int = 1000) -> int | None:
+             verbose: bool = False, max_steps: int = DEFAULT_MAX_STEPS) -> int | None:
     """
-    Run a single game. Returns winner player id, or None if max_turns exceeded.
+    Run a single game to completion.
+
+    `max_steps` bounds the number of individual agent decisions (not full player
+    turns), which keeps pathological stand-offs from running forever.
+    Returns the winning player id, or None if the step budget ran out.
     """
     state = GameState.new_game(board, num_players=len(agents), seed=seed)
     engine = RulesEngine(board, num_players=len(agents), seed=seed)
@@ -67,11 +71,8 @@ def run_game(board: BoardConfig, agents: list[BaseAgent], seed: int,
     for agent in agents:
         agent.reset()
 
-    # Set first player's draft to the normal reinforcement calculation
-    state.troops_to_place = engine._calculate_reinforcements(state, state.current_player)
-
-    turn = 0
-    while not engine.is_terminal(state) and turn < max_turns:
+    steps = 0
+    while not engine.is_terminal(state) and steps < max_steps:
         player = state.current_player
         agent = agents[player]
         legal = engine.legal_actions(state)
@@ -83,24 +84,26 @@ def run_game(board: BoardConfig, agents: list[BaseAgent], seed: int,
         state = engine.apply_action(state, action)
 
         if verbose:
-            print(f"Turn {turn:4d} | P{player} [{agent.__class__.__name__}] | {action}")
+            print(f"[{steps:5d}] turn {state.turn_number:3d} | "
+                  f"P{player} [{agent.__class__.__name__}] | {action}")
 
-        turn += 1
+        steps += 1
 
     winner = engine.winner(state)
     if verbose:
         if winner is not None:
-            print(f"\nWinner: Player {winner} ({agents[winner].__class__.__name__})")
+            print(f"\nWinner: Player {winner} ({agents[winner].__class__.__name__}) "
+                  f"after {state.turn_number} turns ({steps} decisions)")
         else:
-            print(f"\nGame ended after {max_turns} turns with no winner (draw/timeout)")
+            print(f"\nNo winner after {steps} decisions — declared a draw")
         print(state)
     return winner
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Risk games between agents.")
-    parser.add_argument("--config", default="small_20",
-                        help="Board config name (small_20 or classic_42)")
+    parser.add_argument("--config", default="small_20", choices=available_configs(),
+                        help="Board config name")
     parser.add_argument("--p1", default="rule_based",
                         help=f"Agent type for player 1: {list(AGENT_TYPES)}")
     parser.add_argument("--p2", default="random",
@@ -115,9 +118,13 @@ def main():
                         help="Random seed for first game (increments per game)")
     parser.add_argument("--verbose", action="store_true",
                         help="Print every action")
-    parser.add_argument("--max-turns", type=int, default=2000,
-                        help="Max turns before declaring a draw")
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
+                        help="Max agent decisions per game before declaring a draw")
     args = parser.parse_args()
+
+    if args.games < 1:
+        print("--games must be at least 1")
+        sys.exit(1)
 
     config_path = CONFIGS_DIR / f"{args.config}.json"
     if not config_path.exists():
@@ -133,8 +140,11 @@ def main():
     if args.p4:
         player_types.append(args.p4)
 
+    if len(player_types) > board.max_players:
+        print(f"Board '{board.name}' supports at most {board.max_players} players")
+        sys.exit(1)
+
     agents = [build_agent(t, i) for i, t in enumerate(player_types)]
-    num_players = len(agents)
 
     print(f"Board: {board.name} ({board.num_territories} territories)")
     print(f"Players: {', '.join(f'P{i}={t}' for i, t in enumerate(player_types))}")
@@ -147,7 +157,7 @@ def main():
     for g in range(args.games):
         verbose = args.verbose and (args.games == 1)
         winner = run_game(board, agents, seed=args.seed + g,
-                          verbose=verbose, max_turns=args.max_turns)
+                          verbose=verbose, max_steps=args.max_steps)
         if winner is None:
             draws += 1
         else:

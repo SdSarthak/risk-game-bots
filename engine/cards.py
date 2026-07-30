@@ -1,5 +1,5 @@
 import random
-from engine.constants import CardType, CARD_TRADE_BONUSES
+from engine.constants import CARD_TRADE_BONUS_CAP, CARD_TRADE_BONUSES, CardType
 
 
 class CardDeck:
@@ -34,11 +34,17 @@ class CardDeck:
 
     @staticmethod
     def bonus_for_trade(trade_count: int) -> int:
-        """Bonus troops earned for the nth card trade (0-indexed)."""
+        """
+        Bonus troops earned for the nth card trade (0-indexed).
+
+        Follows the standard 4/6/8/10/12/15 ladder, then +5 per trade up to
+        CARD_TRADE_BONUS_CAP.
+        """
+        if trade_count < 0:
+            raise ValueError("trade_count must be non-negative")
         if trade_count < len(CARD_TRADE_BONUSES):
             return CARD_TRADE_BONUSES[trade_count]
-        # After index 5: 15 + 5*(trade_count - 5)
-        return 15 + 5 * (trade_count - 5)
+        return min(15 + 5 * (trade_count - 5), CARD_TRADE_BONUS_CAP)
 
     @staticmethod
     def find_valid_set(hand: list[CardType]) -> list[int] | None:

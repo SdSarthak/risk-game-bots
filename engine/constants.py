@@ -14,8 +14,12 @@ class CardType(Enum):
     WILD = "wild"
 
 
-# Bonus troops for card set trades (escalating)
-CARD_TRADE_BONUSES = [4, 6, 8, 10, 12, 15]  # 15 then +5 each subsequent trade
+# Bonus troops for card set trades (escalating), then +5 per subsequent trade
+CARD_TRADE_BONUSES = [4, 6, 8, 10, 12, 15]
+
+# Ceiling on the escalating trade bonus. Without a ceiling the bonus outgrows
+# combat losses and long games never terminate: both sides simply stockpile.
+CARD_TRADE_BONUS_CAP = 30
 
 # Minimum troops to leave behind in a territory
 MIN_TROOPS = 1
@@ -27,17 +31,8 @@ MAX_DEFEND_DICE = 2
 # Minimum troops needed to attack
 MIN_TROOPS_TO_ATTACK = 2
 
-# Continent member counts (used to validate continent control)
-CONTINENT_SIZES = {
-    "North America": 9,
-    "South America": 4,
-    "Europe": 7,
-    "Africa": 6,
-    "Asia": 12,
-    "Australia": 4,
-    # Small board
-    "West": 5,
-    "East": 5,
-    "North": 5,
-    "South": 5,
-}
+# A hand must be traded in once it reaches this many cards (standard Risk rule)
+MAX_CARDS_IN_HAND = 5
+
+# Cards required to form a tradeable set
+CARDS_PER_SET = 3
