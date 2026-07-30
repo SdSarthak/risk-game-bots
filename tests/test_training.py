@@ -110,6 +110,18 @@ class TestRiskEnv:
         assert env.observation_space.contains(obs)
         assert info == {}
 
+    def test_outcome_is_reported_not_inferred_from_reward(self, env):
+        """A truncated episode can pay out positively without anyone winning."""
+        env.reset(seed=0)
+        for _ in range(env.max_episode_steps + 1):
+            _, _, terminated, truncated, info = env.step(0)
+            if terminated or truncated:
+                assert "is_win" in info and "is_loss" in info
+                if terminated:
+                    assert info["is_win"] == (env._engine.winner(env._state) == 0)
+                return
+        pytest.fail("episode ran past its own step limit")
+
     def test_observation_is_finite(self, env):
         obs, _ = env.reset(seed=0)
         assert np.all(np.isfinite(obs["obs"]))

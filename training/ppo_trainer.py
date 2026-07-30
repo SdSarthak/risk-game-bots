@@ -164,7 +164,7 @@ class PPOTrainer:
                 action_t, log_prob_t, value_t = self.model.act(obs_t, mask_t)
 
             action = int(action_t.item())
-            obs_dict, reward, terminated, truncated, _ = self.env.step(action)
+            obs_dict, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
 
             self.buffer.add(
@@ -184,8 +184,9 @@ class PPOTrainer:
             if done:
                 self._episode_rewards.append(self._cur_ep_reward)
                 self._episode_lengths.append(self._cur_ep_len)
-                # Count win: reward > 0 at episode end (win=+1, loss=-1)
-                self._wins.append(1 if reward > 0.5 else 0)
+                # The env reports the outcome: a truncated episode can pay out
+                # positively without anyone having won.
+                self._wins.append(1 if info.get("is_win") else 0)
                 obs_dict, _ = self.env.reset()
                 self._cur_ep_reward = 0.0
                 self._cur_ep_len = 0

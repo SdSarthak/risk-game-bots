@@ -138,7 +138,10 @@ class RiskEnv(gym.Env):
         if self.render_mode == "human":
             self.render()
 
-        return obs, reward, terminated, truncated, {}
+        # Report the outcome explicitly: reward alone no longer identifies a win
+        # now that a truncated episode can also pay out positively.
+        info = {"is_win": bool(win), "is_loss": bool(eliminated)} if (terminated or truncated) else {}
+        return obs, reward, terminated, truncated, info
 
     def _resolve_action(self, action_idx: int) -> Action:
         """

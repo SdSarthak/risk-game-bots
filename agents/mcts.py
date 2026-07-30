@@ -8,6 +8,15 @@ Uses UCT (Upper Confidence bounds for Trees) with:
 - Max-n backup for multi-player games: each node scores the win rate of whoever
   chose the move leading into it, so opponents are modelled as playing for
   themselves rather than helping us
+- Depth-capped rollouts scored by a positional evaluation, rather than played
+  out to a winner
+
+Branching comes from the coarse action set in `agents/action_space.py`, not the
+engine's full legal list. The full list grows with the product of territories
+and troop counts — a mid-game fortify phase alone enumerates thousands of
+"move n troops from A to B" variants that differ only in n — and building it at
+every expansion dominated the search. The coarse set is a strict subset of
+legal moves, so anything the search returns is still playable.
 """
 from __future__ import annotations
 
@@ -15,6 +24,9 @@ import math
 import time
 from typing import Optional
 
+import numpy as np
+
+from agents.action_space import RiskActionSpace
 from agents.base import BaseAgent
 from agents.rule_based import RuleBasedAgent
 from engine.rules import Action, RulesEngine
@@ -33,7 +45,10 @@ class MCTSNode:
         self.children: list["MCTSNode"] = []
         self.visits = 0
         self.wins = 0.0
-        self.untried_actions = legal_actions[:]
+        # Expansion pops from the end, and the candidate list ends with "end
+        # phase". Reversed, a budget smaller than the branching factor spends
+        # itself on real moves instead of passing before trying a single one.
+        self.untried_actions = legal_actions[::-1]
         self.player_at_node = state.current_player
 
     def uct_score(self, exploration: float = 1.41) -> float:
@@ -82,11 +97,20 @@ class MCTSAgent(BaseAgent):
         # Rollout agents (one per possible player slot)
         self._rollout_agents = [RuleBasedAgent(i) for i in range(MAX_PLAYERS)]
         self._engine: RulesEngine | None = None
-        self._engine_board = None
+        self._encoder: RiskActionSpace | None = None
+        self._board = None
 
     def reset(self) -> None:
         self._engine = None
-        self._engine_board = None
+        self._encoder = None
+        self._board = None
+
+    def candidate_actions(self, state: GameState) -> list[Action]:
+        """Coarse, bounded move set the search branches on."""
+        encoder = self._encoder
+        decoded = (encoder.decode(int(i), state)
+                   for i in np.flatnonzero(encoder.legal_mask(state)))
+        return [a for a in decoded if a is not None]
 
     def _engine_for(self, state: GameState) -> RulesEngine:
         """
@@ -96,9 +120,10 @@ class MCTSAgent(BaseAgent):
         engine per decision would reset the dice stream and rebuild the deck on
         every call.
         """
-        if self._engine is None or self._engine_board is not state.board:
+        if self._engine is None or self._board is not state.board:
             self._engine = RulesEngine(state.board, state.num_players, seed=self.seed)
-            self._engine_board = state.board
+            self._encoder = RiskActionSpace(state.board)
+            self._board = state.board
         return self._engine
 
     def choose_action(self, state: GameState, legal_actions: list[Action]) -> Action:
@@ -106,7 +131,10 @@ class MCTSAgent(BaseAgent):
             return legal_actions[0]
 
         engine = self._engine_for(state)
-        root = MCTSNode(state.copy(), action=None, parent=None, legal_actions=legal_actions)
+        candidates = self.candidate_actions(state) or legal_actions
+        if len(candidates) == 1:
+            return candidates[0]
+        root = MCTSNode(state.copy(), action=None, parent=None, legal_actions=candidates)
 
         deadline = time.time() + self.time_limit
         sims = 0
@@ -140,8 +168,8 @@ class MCTSAgent(BaseAgent):
             return node
         action = node.untried_actions.pop()
         new_state = engine.apply_action(node.state, action)
-        legal = engine.legal_actions(new_state)
-        child = MCTSNode(new_state, action=action, parent=node, legal_actions=legal)
+        child = MCTSNode(new_state, action=action, parent=node,
+                         legal_actions=self.candidate_actions(new_state))
         node.children.append(child)
         return child
 
@@ -158,11 +186,11 @@ class MCTSAgent(BaseAgent):
         for _ in range(self.rollout_depth):
             if engine.is_terminal(s):
                 break
-            legal = engine.legal_actions(s)
-            if not legal:
+            candidates = self.candidate_actions(s)
+            if not candidates:
                 break
             rollout_agent = self._rollout_agents[s.current_player]
-            s = engine.apply_action(s, rollout_agent.choose_action(s, legal))
+            s = engine.apply_action(s, rollout_agent.choose_action(s, candidates))
         return s
 
     @staticmethod
