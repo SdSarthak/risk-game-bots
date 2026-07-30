@@ -24,7 +24,7 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-pytest                            # 199 tests, ~17 seconds
+pytest                            # 204 tests, ~9 seconds
 python play_game.py --config small_20 --p1 rule_based --p2 random --games 20
 ```
 
@@ -93,14 +93,22 @@ terminating:
 Benchmark them round-robin, with each pairing split evenly between seats:
 
 ```bash
-python benchmark.py --games 20                    # all agents
-python benchmark.py --games 40 --no-mcts          # fast, MCTS is the slow one
+python benchmark.py --games 40 --no-mcts          # seconds
+python benchmark.py --games 20                    # all agents; MCTS is the slow one
 python benchmark.py --config classic_42 --games 10
 python benchmark.py --games 20 --mcts-sims 200    # give MCTS more thinking time
 ```
 
-`rule_based` is the yardstick: it beats `random` essentially every game, and both
-`mcts` at a small rollout budget and a lightly trained `rl` policy sit below it.
+`rule_based` is the yardstick, and a high one: it wins 20/20 against `random` on
+`small_20`. Both of the search-based agents currently sit below it —
+
+- `mcts` at the default 30 rollouts per decision is still behind `random` on
+  `small_20`. Thirty rollouts is thin next to the branching factor, and the
+  positional evaluation backing up truncated rollouts is crude. Raise
+  `--mcts-sims` for a fairer comparison, at proportional cost.
+- `rl` needs far more training than a short run provides; see below.
+
+Treat those two as work in progress rather than tuned opponents.
 
 ## Training the RL agent
 
@@ -110,6 +118,12 @@ produce one:
 ```bash
 python training/run_training.py --config small_20 --timesteps 500000
 ```
+
+**Expect this to take a while to pay off.** The pipeline trains at roughly 250
+env-steps/second on a laptop GPU, and a quarter of a million steps against the
+`random` opponent still leaves the policy well short of `rule_based`. Risk has a
+long horizon, a sparse win signal and a large action set; the numbers above are
+a starting point, not a recipe for a strong agent.
 
 Checkpoints land in `checkpoints/` as `.pt` files every `--save-interval`
 steps. `play_game.py --p1 rl`, `benchmark.py` and the API all pick up the
