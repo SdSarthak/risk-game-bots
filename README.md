@@ -24,7 +24,7 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-pytest                            # 162 tests, ~11 seconds
+pytest                            # 199 tests, ~17 seconds
 python play_game.py --config small_20 --p1 rule_based --p2 random --games 20
 ```
 
@@ -87,8 +87,8 @@ terminating:
 | --- | --- |
 | `random` | Uniform over legal actions. The floor. |
 | `rule_based` | Reinforces its most threatened border, attacks when it holds a 1.5:1 advantage, prefers captures that complete a continent, fortifies interior troops to its weakest border. |
-| `mcts` | UCT with a time budget per move, using `rule_based` as the rollout policy. |
-| `rl` | PPO actor-critic (`agents/neural_net.py`) trained by self-play against a fixed opponent. |
+| `mcts` | UCT with `rule_based` as the rollout policy, backed up max-n so opponents in the tree play for themselves. Budgeted in rollouts per decision (`--mcts-sims`), not wall-clock, so a run's cost is predictable. |
+| `rl` | PPO actor-critic (`agents/neural_net.py`) over the fixed action layout in `agents/action_space.py`. |
 
 Benchmark them round-robin, with each pairing split evenly between seats:
 
@@ -96,7 +96,11 @@ Benchmark them round-robin, with each pairing split evenly between seats:
 python benchmark.py --games 20                    # all agents
 python benchmark.py --games 40 --no-mcts          # fast, MCTS is the slow one
 python benchmark.py --config classic_42 --games 10
+python benchmark.py --games 20 --mcts-sims 200    # give MCTS more thinking time
 ```
+
+`rule_based` is the yardstick: it beats `random` essentially every game, and both
+`mcts` at a small rollout budget and a lightly trained `rl` policy sit below it.
 
 ## Training the RL agent
 
@@ -125,6 +129,31 @@ point of view, per-territory troop share, whose turn it is, the phase, and the
 mover's hand. Rewards are sparse win/loss shaped with a potential function over
 territory, continent and troop share — potential-based shaping (Ng et al. 1999)
 leaves the optimal policy unchanged.
+
+### The action space
+
+The policy does **not** pick an index into the engine's list of legal actions.
+That list changes length and order every step, so the same index means a draft
+on one turn and an unrelated attack on the next, and nothing about the mapping
+is learnable. `agents/action_space.py` lays actions out at fixed slots instead:
+
+```
+[0, 42)          draft: commit the whole allotment to territory t
+[42, 462)        attack: from t against its k-th neighbour, maximum dice
+[462, 882)       fortify: from t to its k-th neighbour, whole movable garrison
+[882]            end the current phase
+```
+
+Index 61 is always "attack from territory 1 against its second neighbour",
+whichever board is in play. Illegal slots are masked to `-inf` before the
+softmax, so the policy can never sample a move the rules reject.
+
+The encoding covers a deliberate subset of the rules — drafts are not split
+across territories, attacks always roll the maximum dice, and fortifies go to an
+adjacent territory rather than any connected one. Every action it emits is
+legal; it simply cannot express every legal action. Checkpoints record the head
+width, so one trained against a different layout is refused rather than
+silently mis-played.
 
 ## Running the web app
 

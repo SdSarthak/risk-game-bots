@@ -5,6 +5,10 @@ CLI script to run Risk games between agents.
 Usage:
   python play_game.py --config small_20 --p1 rule_based --p2 random --games 10
   python play_game.py --config classic_42 --p1 mcts --p2 rule_based --games 1 --verbose
+  python play_game.py --config grid_6x6 --p1 rule_based --p2 random --p3 random
+
+Add --p3/--p4 for more players, --seed to reproduce a match, and --verbose with
+--games 1 to print every decision.
 """
 import argparse
 import pathlib
