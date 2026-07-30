@@ -2,16 +2,20 @@
 """
 Benchmark all agents against each other and print a leaderboard.
 
+Every pairing is split evenly between seats so no agent benefits from moving
+first. MCTS is budgeted in rollouts rather than seconds, so a run's cost is
+predictable; raise it with --mcts-sims when you want a stronger search.
+
 Usage:
   python benchmark.py
   python benchmark.py --games 100 --config classic_42
+  python benchmark.py --games 40 --no-mcts
 """
 import argparse
 import pathlib
 import sys
 import time
 from collections import defaultdict
-from itertools import permutations
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
