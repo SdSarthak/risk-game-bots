@@ -2,9 +2,12 @@
 Monte Carlo Tree Search agent for Risk.
 
 Uses UCT (Upper Confidence bounds for Trees) with:
-- Chance nodes to handle dice randomness during simulation
+- Dice randomness resolved by the engine during rollout, so a node's statistics
+  average over outcomes rather than assuming a fixed one
 - RuleBasedAgent as the rollout policy (much stronger signal than random)
-- Multi-player adaptation: maximize own win probability
+- Max-n backup for multi-player games: each node scores the win rate of whoever
+  chose the move leading into it, so opponents are modelled as playing for
+  themselves rather than helping us
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from typing import Optional
 from agents.base import BaseAgent
 from agents.rule_based import RuleBasedAgent
 from engine.rules import Action, RulesEngine
-from engine.state import GameState
+from engine.state import MAX_PLAYERS, GameState
 
 
 class MCTSNode:
@@ -53,25 +56,52 @@ class MCTSNode:
 
 class MCTSAgent(BaseAgent):
     """
-    MCTS agent. Thinks for `time_limit` seconds (or `num_simulations` rollouts)
-    per move, using RuleBasedAgent for rollouts.
+    MCTS agent, using RuleBasedAgent for rollouts.
+
+    Budget: `num_simulations` rollouts per move when set, otherwise `time_limit`
+    seconds. Prefer the rollout budget when the run has to be reproducible or
+    bounded — wall-clock budgets make a benchmark's runtime unpredictable.
     """
+
+    MAX_ROLLOUT_STEPS = 500  # guards against stand-offs inside a simulation
 
     def __init__(self, player_id: int, time_limit: float = 1.0,
                  num_simulations: int | None = None, exploration: float = 1.41,
                  seed: int | None = None):
         super().__init__(player_id)
+        if num_simulations is not None and num_simulations < 1:
+            raise ValueError("num_simulations must be at least 1")
         self.time_limit = time_limit
         self.num_simulations = num_simulations
         self.exploration = exploration
+        self.seed = seed
         # Rollout agents (one per possible player slot)
-        self._rollout_agents = [RuleBasedAgent(i) for i in range(6)]
+        self._rollout_agents = [RuleBasedAgent(i) for i in range(MAX_PLAYERS)]
+        self._engine: RulesEngine | None = None
+        self._engine_board = None
+
+    def reset(self) -> None:
+        self._engine = None
+        self._engine_board = None
+
+    def _engine_for(self, state: GameState) -> RulesEngine:
+        """
+        Search engine for the current board.
+
+        Kept between moves so the seed actually determines the search: a fresh
+        engine per decision would reset the dice stream and rebuild the deck on
+        every call.
+        """
+        if self._engine is None or self._engine_board is not state.board:
+            self._engine = RulesEngine(state.board, state.num_players, seed=self.seed)
+            self._engine_board = state.board
+        return self._engine
 
     def choose_action(self, state: GameState, legal_actions: list[Action]) -> Action:
         if len(legal_actions) == 1:
             return legal_actions[0]
 
-        engine = RulesEngine(state.board, state.num_players)
+        engine = self._engine_for(state)
         root = MCTSNode(state.copy(), action=None, parent=None, legal_actions=legal_actions)
 
         deadline = time.time() + self.time_limit
@@ -87,7 +117,7 @@ class MCTSAgent(BaseAgent):
             if not leaf.is_terminal(engine):
                 leaf = self._expand(leaf, engine)
             result = self._rollout(leaf.state, engine)
-            self._backpropagate(leaf, result, self.player_id)
+            self._backpropagate(leaf, result)
             sims += 1
 
         # Pick the most visited child
@@ -114,21 +144,29 @@ class MCTSAgent(BaseAgent):
     def _rollout(self, state: GameState, engine: RulesEngine) -> int | None:
         """Run a full game from state using RuleBasedAgent. Returns winner id or None."""
         s = state.copy()
-        max_steps = 500  # Prevent infinite loops in degenerate states
         steps = 0
-        while not engine.is_terminal(s) and steps < max_steps:
+        while not engine.is_terminal(s) and steps < self.MAX_ROLLOUT_STEPS:
             legal = engine.legal_actions(s)
+            if not legal:
+                break
             rollout_agent = self._rollout_agents[s.current_player]
-            action = rollout_agent.choose_action(s, legal)
-            s = engine.apply_action(s, action)
+            s = engine.apply_action(s, rollout_agent.choose_action(s, legal))
             steps += 1
         return engine.winner(s)
 
-    def _backpropagate(self, node: MCTSNode, winner: int | None, our_player: int) -> None:
+    def _backpropagate(self, node: MCTSNode, winner: int | None) -> None:
+        """
+        Credit each node to the player who chose the move leading into it.
+
+        Scoring every node by *our* win rate would have opponents selecting the
+        moves that help us most, which is the opposite of what they will do.
+        """
         while node is not None:
             node.visits += 1
-            if winner == our_player:
-                node.wins += 1.0
-            elif winner is None:
-                node.wins += 0.5  # Draw / timeout
+            if node.parent is not None:
+                mover = node.parent.player_at_node
+                if winner is None:
+                    node.wins += 0.5  # Draw / timeout
+                elif winner == mover:
+                    node.wins += 1.0
             node = node.parent
