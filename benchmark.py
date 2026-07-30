@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""
+Benchmark all agents against each other and print a leaderboard.
+
+Usage:
+  python benchmark.py
+  python benchmark.py --games 100 --config classic_42
+"""
+import argparse
+import pathlib
+import sys
+import time
+from collections import defaultdict
+from itertools import permutations
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+
+from engine.board import BoardConfig
+from engine.rules import RulesEngine
+from engine.state import GameState
+from agents.random_agent import RandomAgent
+from agents.rule_based import RuleBasedAgent
+from agents.mcts import MCTSAgent
+
+CONFIGS_DIR = pathlib.Path(__file__).parent / "configs"
+CHECKPOINTS_DIR = pathlib.Path(__file__).parent / "checkpoints"
+
+
+def load_agents(include_rl: bool, include_mcts: bool) -> dict:
+    agents = {
+        "random":     lambda pid: RandomAgent(pid),
+        "rule_based": lambda pid: RuleBasedAgent(pid),
+    }
+    if include_mcts:
+        agents["mcts"] = lambda pid: MCTSAgent(pid, time_limit=0.5)
+    if include_rl:
+        from agents.rl_agent import RLAgent
+        best = CHECKPOINTS_DIR / "best" / "best_model.zip"
+        final = CHECKPOINTS_DIR / "risk_ppo_final_500000"
+        path = str(best) if best.exists() else str(final)
+        agents["rl"] = lambda pid, p=path: RLAgent.load(pid, p)
+    return agents
+
+
+def run_game(board, agents_list, seed, max_turns=2000):
+    state = GameState.new_game(board, num_players=len(agents_list), seed=seed)
+    engine = RulesEngine(board, num_players=len(agents_list), seed=seed)
+    state.troops_to_place = engine._calculate_reinforcements(state, state.current_player)
+
+    for agent in agents_list:
+        agent.reset()
+
+    for _ in range(max_turns):
+        if engine.is_terminal(state):
+            break
+        legal = engine.legal_actions(state)
+        if not legal:
+            break
+        action = agents_list[state.current_player].choose_action(state, legal)
+        state = engine.apply_action(state, action)
+
+    return engine.winner(state)
+
+
+def run_matchup(board, name_a, factory_a, name_b, factory_b, games, seed_offset):
+    wins = {name_a: 0, name_b: 0, "draw": 0}
+    # Play half as P0, half as P1 to cancel positional bias
+    half = games // 2
+    for g in range(half):
+        agents = [factory_a(0), factory_b(1)]
+        w = run_game(board, agents, seed=seed_offset + g)
+        if w == 0:     wins[name_a] += 1
+        elif w == 1:   wins[name_b] += 1
+        else:          wins["draw"] += 1
+    for g in range(games - half):
+        agents = [factory_b(0), factory_a(1)]
+        w = run_game(board, agents, seed=seed_offset + half + g)
+        if w == 1:     wins[name_a] += 1
+        elif w == 0:   wins[name_b] += 1
+        else:          wins["draw"] += 1
+    return wins
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="small_20")
+    parser.add_argument("--games", type=int, default=20,
+                        help="Games per matchup (split evenly as P0/P1)")
+    parser.add_argument("--no-mcts", action="store_true", help="Skip MCTS (slow)")
+    parser.add_argument("--no-rl",   action="store_true", help="Skip RL agent")
+    args = parser.parse_args()
+
+    board = BoardConfig.load(str(CONFIGS_DIR / f"{args.config}.json"))
+    include_rl = not args.no_rl
+
+    # Check if RL checkpoint exists
+    best = CHECKPOINTS_DIR / "best" / "best_model.zip"
+    final = CHECKPOINTS_DIR / "risk_ppo_final_500000.zip"
+    final_no_ext = CHECKPOINTS_DIR / "risk_ppo_final_500000"
+    rl_available = best.exists() or final.exists() or final_no_ext.exists()
+    if include_rl and not rl_available:
+        print("No RL checkpoint found — skipping RL agent.")
+        print("Train first with: python training/run_training.py --config small_20\n")
+        include_rl = False
+
+    include_mcts = not args.no_mcts
+
+    agents = load_agents(include_rl=include_rl, include_mcts=include_mcts)
+    names = list(agents.keys())
+
+    print(f"Board:   {board.name}")
+    print(f"Agents:  {', '.join(names)}")
+    print(f"Games:   {args.games} per matchup ({args.games // 2} as P0, {args.games - args.games // 2} as P1)")
+    print(f"Matchups: {len(names) * (len(names) - 1) // 2}")
+    print()
+
+    # Track ELO-style win counts
+    total_wins = defaultdict(int)
+    total_games = defaultdict(int)
+    results_table = {}
+
+    name_pairs = [(names[i], names[j]) for i in range(len(names)) for j in range(i+1, len(names))]
+    total_matchups = len(name_pairs)
+
+    for idx, (a, b) in enumerate(name_pairs):
+        print(f"[{idx+1}/{total_matchups}] {a} vs {b} ... ", end="", flush=True)
+        t0 = time.time()
+        result = run_matchup(board, a, agents[a], b, agents[b],
+                             games=args.games, seed_offset=idx * 1000)
+        elapsed = time.time() - t0
+
+        wa, wb = result[a], result[b]
+        draws = result["draw"]
+        total_wins[a] += wa
+        total_wins[b] += wb
+        total_games[a] += args.games
+        total_games[b] += args.games
+        results_table[(a, b)] = (wa, wb, draws)
+
+        print(f"{a} {wa}–{wb} {b}  (draws: {draws})  [{elapsed:.1f}s]")
+
+    # --- Results table ---
+    print()
+    print("=" * 60)
+    print("HEAD-TO-HEAD RESULTS")
+    print("=" * 60)
+    col_w = max(len(n) for n in names) + 2
+    header = f"{'':>{col_w}}" + "".join(f"{n:>{col_w}}" for n in names)
+    print(header)
+    for a in names:
+        row = f"{a:>{col_w}}"
+        for b in names:
+            if a == b:
+                row += f"{'—':>{col_w}}"
+            elif (a, b) in results_table:
+                wa, wb, _ = results_table[(a, b)]
+                row += f"{wa:>{col_w}}"
+            else:
+                wa, wb, _ = results_table[(b, a)]
+                row += f"{wb:>{col_w}}"
+        print(row)
+
+    # --- Leaderboard ---
+    print()
+    print("=" * 60)
+    print("LEADERBOARD  (win rate across all matchups)")
+    print("=" * 60)
+    ranked = sorted(names, key=lambda n: total_wins[n] / max(1, total_games[n]), reverse=True)
+    for rank, name in enumerate(ranked, 1):
+        wr = total_wins[name] / max(1, total_games[name]) * 100
+        print(f"  #{rank}  {name:<14}  {total_wins[name]:>3}W / {total_games[name]:>3}G  ({wr:.1f}%)")
+    print()
+
+
+if __name__ == "__main__":
+    main()
