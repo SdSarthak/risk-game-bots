@@ -22,9 +22,12 @@ CHECKPOINTS_DIR = pathlib.Path(__file__).parent.parent / "checkpoints"
 class SelfPlayTrainer:
     """
     Runs episodes of Risk for self-play data collection.
-    The actual PPO update happens in run_training.py via SB3.
-    This class handles opponent sampling and episode management.
+
+    The PPO update itself lives in :class:`training.ppo_trainer.PPOTrainer`;
+    this class only handles opponent sampling and episode management.
     """
+
+    BASELINE_OPPONENT_PROBABILITY = 0.3
 
     def __init__(self, board: BoardConfig, num_players: int = 2,
                  pool_size: int = 5, seed: int | None = None):
@@ -41,15 +44,21 @@ class SelfPlayTrainer:
         self._checkpoint_pool.append(checkpoint_path)
 
     def sample_opponent(self):
-        """Return a RuleBasedAgent (baseline) or a loaded RL agent from pool."""
-        if not self._checkpoint_pool or self._rng.random() < 0.3:
+        """
+        Pick this episode's opponent.
+
+        Falls back to the rule-based baseline when the pool is empty, some of
+        the time regardless, and whenever a checkpoint fails to load — a
+        corrupt or half-written file should cost one episode, not the run.
+        """
+        if (not self._checkpoint_pool
+                or self._rng.random() < self.BASELINE_OPPONENT_PROBABILITY):
             return RuleBasedAgent(1)
-        # Load PyTorch RL agent from a random checkpoint (.pt file)
         try:
             from agents.rl_agent import RLAgent
             path = self._rng.choice(list(self._checkpoint_pool))
             return RLAgent.load(1, path)
-        except Exception:
+        except (OSError, KeyError, RuntimeError, ValueError):
             return RuleBasedAgent(1)
 
     def run_episode(self, rl_agent, max_turns: int = 2000) -> dict:

@@ -35,6 +35,10 @@ from training.reward import RewardShaper
 CONFIGS_DIR = pathlib.Path(__file__).parent.parent / "configs"
 MAX_LEGAL_ACTIONS = 500  # Upper bound on legal actions per step
 
+# Stand-offs between cautious policies can run indefinitely; truncate them so a
+# single episode can never stall a training run.
+MAX_EPISODE_STEPS = 5_000
+
 
 class RiskEnv(gym.Env):
     """
@@ -49,12 +53,20 @@ class RiskEnv(gym.Env):
                  num_players: int = 2,
                  opponent_agent_cls=None,
                  gamma: float = 0.99,
+                 max_episode_steps: int = MAX_EPISODE_STEPS,
                  render_mode: str | None = None):
         super().__init__()
-        config_path = str(CONFIGS_DIR / f"{config_name}.json")
-        self.board = BoardConfig.load(config_path)
+        config_path = CONFIGS_DIR / f"{config_name}.json"
+        if not config_path.exists():
+            available = ", ".join(sorted(p.stem for p in CONFIGS_DIR.glob("*.json")))
+            raise FileNotFoundError(
+                f"No board config named '{config_name}'. Available: {available}"
+            )
+        self.board = BoardConfig.load(str(config_path))
         self.num_players = num_players
+        self.max_episode_steps = max_episode_steps
         self.render_mode = render_mode
+        self._elapsed_steps = 0
 
         # Opponent factory
         if opponent_agent_cls is None:
@@ -92,40 +104,46 @@ class RiskEnv(gym.Env):
         self._state = self._run_opponents_until_our_turn()
         self._legal_actions = self._engine.legal_actions(self._state)
         self._shaper.reset(self._state)
+        self._elapsed_steps = 0
 
         return self._get_obs(), {}
 
     def step(self, action_idx: int):
-        assert self._state is not None, "Call reset() first"
+        if self._state is None:
+            raise RuntimeError("Call reset() before step()")
+        if not self._legal_actions:
+            raise RuntimeError("No legal actions available; the episode is over")
 
-        # Clamp to valid range
-        action_idx = min(action_idx, len(self._legal_actions) - 1)
+        # The mask only marks the first len(legal) indices, but clamp anyway so a
+        # policy that ignores the mask still produces a playable action.
+        action_idx = int(np.clip(action_idx, 0, len(self._legal_actions) - 1))
         action = self._legal_actions[action_idx]
 
         self._state = self._engine.apply_action(self._state, action)
+        self._elapsed_steps += 1
 
         # Check terminal after our action
         terminated = self._engine.is_terminal(self._state)
         win = terminated and self._engine.winner(self._state) == 0
-        eliminated = 0 in [p for p in range(self.num_players)
-                           if self._state.eliminated[p]]
+        eliminated = self._state.eliminated[0]
 
         if not terminated:
             # Let opponents play until it's our turn again
             self._state = self._run_opponents_until_our_turn()
             terminated = self._engine.is_terminal(self._state)
-            eliminated = eliminated or (not terminated and
-                                        self._state.eliminated[0])
+            eliminated = eliminated or self._state.eliminated[0]
+            win = win or (terminated and self._engine.winner(self._state) == 0)
 
         reward = self._shaper.step(self._state, win=win, eliminated=eliminated)
 
         self._legal_actions = self._engine.legal_actions(self._state)
+        truncated = not terminated and self._elapsed_steps >= self.max_episode_steps
         obs = self._get_obs()
 
         if self.render_mode == "human":
             self.render()
 
-        return obs, reward, terminated, False, {}
+        return obs, reward, terminated, truncated, {}
 
     def render(self):
         if self._state is not None:
