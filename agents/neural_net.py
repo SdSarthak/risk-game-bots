@@ -42,8 +42,13 @@ class RiskActorCritic(nn.Module):
         num_layers: int = 3,
     ) -> None:
         super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+        # Kept as attributes so a checkpoint can rebuild the same architecture
         self.obs_size = obs_size
         self.action_size = action_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
 
         # Shared trunk
         layers: list[nn.Module] = [nn.Linear(obs_size, hidden_size), nn.ReLU()]

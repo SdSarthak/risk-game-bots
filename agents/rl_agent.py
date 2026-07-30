@@ -31,7 +31,9 @@ class RLAgent(BaseAgent):
                 "against a different encoding — retrain with "
                 "training/run_training.py."
             )
-        self._model = model
+        # The model may have been built straight from the constructor, which
+        # leaves it on the CPU while observations are sent to DEVICE.
+        self._model = model.to(DEVICE)
         self._model.eval()
         self._deterministic = deterministic
         self._encoder: RiskActionSpace | None = None

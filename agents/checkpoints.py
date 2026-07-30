@@ -29,16 +29,43 @@ def list_checkpoints(directory: pathlib.Path | str | None = None) -> list[pathli
     return sorted(root.glob("*.pt"), key=lambda p: (_step_count(p), p.name))
 
 
+def is_compatible(path: pathlib.Path) -> bool:
+    """
+    Whether a checkpoint's policy head matches the current action layout.
+
+    Checkpoints from an older encoding load fine but index a different action
+    space, so they have to be skipped rather than silently mis-played. An
+    unreadable file is treated as incompatible.
+    """
+    try:
+        import torch
+
+        from agents.action_space import ACTION_SPACE_SIZE
+    except ImportError:
+        return True  # torch is absent, so nothing will load this anyway
+
+    try:
+        header = torch.load(path, map_location="cpu", weights_only=True)
+        return int(header["action_size"]) == ACTION_SPACE_SIZE
+    except Exception:  # noqa: BLE001 - torch raises many types for a bad file
+        return False
+
+
 def find_latest_checkpoint(
     directory: pathlib.Path | str | None = None,
+    require_compatible: bool = True,
 ) -> pathlib.Path | None:
     """
-    Best available checkpoint, or None if the directory holds none.
+    Best available checkpoint, or None if the directory holds no usable one.
 
     A ``best_model.pt`` written by an evaluation callback always wins; otherwise
-    the checkpoint with the highest training step count is used.
+    the checkpoint with the highest training step count is used. Checkpoints
+    built for a different action space are skipped unless
+    ``require_compatible`` is False.
     """
     checkpoints = list_checkpoints(directory)
+    if require_compatible:
+        checkpoints = [p for p in checkpoints if is_compatible(p)]
     if not checkpoints:
         return None
     for path in checkpoints:

@@ -140,14 +140,35 @@ class TestCheckpointLocator:
     def test_picks_the_highest_step_count(self, tmp_path):
         for name in ["risk_ppo_2048.pt", "risk_ppo_1001472.pt", "risk_ppo_204800.pt"]:
             (tmp_path / name).touch()
-        assert find_latest_checkpoint(tmp_path).name == "risk_ppo_1001472.pt"
+        latest = find_latest_checkpoint(tmp_path, require_compatible=False)
+        assert latest.name == "risk_ppo_1001472.pt"
 
     def test_best_model_wins_over_step_count(self, tmp_path):
         (tmp_path / "risk_ppo_1001472.pt").touch()
         (tmp_path / "best_model.pt").touch()
-        assert find_latest_checkpoint(tmp_path).name == "best_model.pt"
+        latest = find_latest_checkpoint(tmp_path, require_compatible=False)
+        assert latest.name == "best_model.pt"
 
     def test_ignores_non_checkpoints(self, tmp_path):
         (tmp_path / "risk_ppo_500000.zip").touch()
         (tmp_path / "notes.txt").touch()
         assert list_checkpoints(tmp_path) == []
+
+    def test_skips_checkpoints_from_another_action_space(self, tmp_path):
+        """An old checkpoint indexes a different layout and must not be picked up."""
+        torch = pytest.importorskip("torch")
+        from agents.action_space import ACTION_SPACE_SIZE
+
+        stale = tmp_path / "risk_ppo_900000.pt"
+        torch.save({"model_state": {}, "obs_size": 118, "action_size": 500}, stale)
+        assert find_latest_checkpoint(tmp_path) is None
+
+        current = tmp_path / "risk_ppo_100000.pt"
+        torch.save({"model_state": {}, "obs_size": 118,
+                    "action_size": ACTION_SPACE_SIZE}, current)
+        assert find_latest_checkpoint(tmp_path).name == current.name
+
+    def test_corrupt_checkpoint_is_skipped(self, tmp_path):
+        pytest.importorskip("torch")
+        (tmp_path / "risk_ppo_100000.pt").write_text("not a checkpoint")
+        assert find_latest_checkpoint(tmp_path) is None

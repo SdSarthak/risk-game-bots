@@ -338,6 +338,9 @@ class PPOTrainer:
             "total_steps": self.total_steps,
             "obs_size": self.model.obs_size,
             "action_size": self.model.action_size,
+            # Without the shape, --hidden/--layers runs cannot be reloaded
+            "hidden_size": self.model.hidden_size,
+            "num_layers": self.model.num_layers,
         }, path)
 
     @classmethod
@@ -349,6 +352,9 @@ class PPOTrainer:
         model = RiskActorCritic(
             obs_size=ckpt["obs_size"],
             action_size=ckpt["action_size"],
+            # Checkpoints written before the shape was recorded used the defaults
+            hidden_size=ckpt.get("hidden_size", 256),
+            num_layers=ckpt.get("num_layers", 3),
         ).to(dev)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
