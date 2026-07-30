@@ -63,17 +63,21 @@ class MCTSAgent(BaseAgent):
     bounded — wall-clock budgets make a benchmark's runtime unpredictable.
     """
 
-    MAX_ROLLOUT_STEPS = 500  # guards against stand-offs inside a simulation
+    DEFAULT_ROLLOUT_DEPTH = 40
 
     def __init__(self, player_id: int, time_limit: float = 1.0,
                  num_simulations: int | None = None, exploration: float = 1.41,
+                 rollout_depth: int = DEFAULT_ROLLOUT_DEPTH,
                  seed: int | None = None):
         super().__init__(player_id)
         if num_simulations is not None and num_simulations < 1:
             raise ValueError("num_simulations must be at least 1")
+        if rollout_depth < 1:
+            raise ValueError("rollout_depth must be at least 1")
         self.time_limit = time_limit
         self.num_simulations = num_simulations
         self.exploration = exploration
+        self.rollout_depth = rollout_depth
         self.seed = seed
         # Rollout agents (one per possible player slot)
         self._rollout_agents = [RuleBasedAgent(i) for i in range(MAX_PLAYERS)]
@@ -116,8 +120,8 @@ class MCTSAgent(BaseAgent):
             leaf = self._select(root, engine)
             if not leaf.is_terminal(engine):
                 leaf = self._expand(leaf, engine)
-            result = self._rollout(leaf.state, engine)
-            self._backpropagate(leaf, result)
+            outcome = self._rollout(leaf.state, engine)
+            self._backpropagate(leaf, outcome, engine)
             sims += 1
 
         # Pick the most visited child
@@ -141,32 +145,56 @@ class MCTSAgent(BaseAgent):
         node.children.append(child)
         return child
 
-    def _rollout(self, state: GameState, engine: RulesEngine) -> int | None:
-        """Run a full game from state using RuleBasedAgent. Returns winner id or None."""
+    def _rollout(self, state: GameState, engine: RulesEngine) -> GameState:
+        """
+        Play out at most `rollout_depth` decisions with the heuristic policy.
+
+        Risk games run to hundreds of decisions, so playing every rollout to a
+        winner costs thousands of engine steps per simulation and puts a full
+        benchmark into the hours. A truncated rollout scored by `evaluate`
+        gives the same ranking signal for a fraction of the work.
+        """
         s = state.copy()
-        steps = 0
-        while not engine.is_terminal(s) and steps < self.MAX_ROLLOUT_STEPS:
+        for _ in range(self.rollout_depth):
+            if engine.is_terminal(s):
+                break
             legal = engine.legal_actions(s)
             if not legal:
                 break
             rollout_agent = self._rollout_agents[s.current_player]
             s = engine.apply_action(s, rollout_agent.choose_action(s, legal))
-            steps += 1
-        return engine.winner(s)
+        return s
 
-    def _backpropagate(self, node: MCTSNode, winner: int | None) -> None:
+    @staticmethod
+    def evaluate(state: GameState, player: int) -> float:
+        """
+        How good `state` looks for `player`, in [0, 1].
+
+        Territory share dominates because it drives reinforcements; troop share
+        breaks ties between positions holding the same ground.
+        """
+        territory_share = (len(state.territories_of(player))
+                           / max(1, state.board.num_territories))
+        troop_share = state.troop_count_of(player) / max(1, sum(state.troops))
+        return 0.6 * territory_share + 0.4 * troop_share
+
+    def _backpropagate(self, node: MCTSNode, final_state: GameState,
+                       engine: RulesEngine) -> None:
         """
         Credit each node to the player who chose the move leading into it.
 
         Scoring every node by *our* win rate would have opponents selecting the
         moves that help us most, which is the opposite of what they will do.
+        A rollout that ended in a win scores 1 or 0; a truncated one scores the
+        position it reached.
         """
+        winner = engine.winner(final_state)
         while node is not None:
             node.visits += 1
             if node.parent is not None:
                 mover = node.parent.player_at_node
-                if winner is None:
-                    node.wins += 0.5  # Draw / timeout
-                elif winner == mover:
-                    node.wins += 1.0
+                if winner is not None:
+                    node.wins += 1.0 if winner == mover else 0.0
+                else:
+                    node.wins += self.evaluate(final_state, mover)
             node = node.parent

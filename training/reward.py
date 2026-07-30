@@ -62,16 +62,31 @@ class RewardShaper:
     def reset(self, state: GameState) -> None:
         self._prev_potential = potential(state, self.player_id)
 
-    def step(self, state: GameState, win: bool, eliminated: bool) -> float:
+    def step(self, state: GameState, win: bool, eliminated: bool,
+             truncated: bool = False) -> float:
         """Compute shaped reward after transitioning to `state`."""
         # Sparse terminal reward
         if win:
             return self.WIN_REWARD
         if eliminated:
             return self.LOSS_REWARD
+        if truncated:
+            return self.truncation_reward(state)
 
         # Potential-based shaping
         new_potential = potential(state, self.player_id)
         shaped = self.shaping_weight * (self.gamma * new_potential - self._prev_potential)
         self._prev_potential = new_potential
         return shaped
+
+    def truncation_reward(self, state: GameState) -> float:
+        """
+        Payout for an episode that hit its step limit without a winner.
+
+        Leaving truncation unrewarded makes stalling strictly better than
+        fighting and losing, and a policy will find that: it stops attacking,
+        runs out the clock and never collects the -1. Scoring the position it
+        reached removes the dodge — a player behind on the board still loses.
+        """
+        share = potential(state, self.player_id)
+        return self.LOSS_REWARD + (self.WIN_REWARD - self.LOSS_REWARD) * share

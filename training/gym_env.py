@@ -128,10 +128,11 @@ class RiskEnv(gym.Env):
             eliminated = eliminated or self._state.eliminated[0]
             win = win or (terminated and self._engine.winner(self._state) == 0)
 
-        reward = self._shaper.step(self._state, win=win, eliminated=eliminated)
+        truncated = not terminated and self._elapsed_steps >= self.max_episode_steps
+        reward = self._shaper.step(self._state, win=win, eliminated=eliminated,
+                                   truncated=truncated)
 
         self._mask = self.action_encoder.legal_mask(self._state)
-        truncated = not terminated and self._elapsed_steps >= self.max_episode_steps
         obs = self._get_obs()
 
         if self.render_mode == "human":

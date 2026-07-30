@@ -61,6 +61,31 @@ class TestRewardShaper:
         worse.owners = [1] * (small_board.num_territories - 1) + [0]
         assert shaper.step(worse, win=False, eliminated=False) < 0
 
+    def test_truncation_from_behind_is_not_free(self, small_board):
+        """Stalling out the clock must not beat fighting and losing."""
+        state = GameState.new_game(small_board, num_players=2, seed=1)
+        losing = state.copy()
+        losing.owners = [1] * (small_board.num_territories - 1) + [0]
+        shaper = RewardShaper(player_id=0)
+        shaper.reset(state)
+        assert shaper.step(losing, win=False, eliminated=False,
+                           truncated=True) < 0
+
+    def test_truncation_while_ahead_pays_out(self, small_board):
+        state = GameState.new_game(small_board, num_players=2, seed=1)
+        winning = state.copy()
+        winning.owners = [0] * (small_board.num_territories - 1) + [1]
+        shaper = RewardShaper(player_id=0)
+        shaper.reset(state)
+        assert shaper.step(winning, win=False, eliminated=False, truncated=True) > 0
+
+    def test_truncation_reward_stays_inside_the_terminal_range(self, small_board):
+        state = GameState.new_game(small_board, num_players=3, seed=2)
+        shaper = RewardShaper(player_id=0)
+        for player_state in (state, state.copy()):
+            reward = shaper.truncation_reward(player_state)
+            assert RewardShaper.LOSS_REWARD <= reward <= RewardShaper.WIN_REWARD
+
     def test_shaping_is_small_next_to_the_terminal_reward(self, small_board):
         """Shaping must not drown out the win/loss signal it is guiding towards."""
         state = GameState.new_game(small_board, num_players=2, seed=1)
@@ -135,6 +160,18 @@ class TestRiskEnv:
         env.reset(seed=0)
         flags = [env.step(0)[2:4] for _ in range(3)]
         assert any(terminated or truncated for terminated, truncated in flags)
+
+    def test_truncation_pays_out_rather_than_ending_neutral(self):
+        env = RiskEnv(config_name="small_20", num_players=2, max_episode_steps=2)
+        env.reset(seed=0)
+        for _ in range(2):
+            _, reward, terminated, truncated, _ = env.step(0)
+            if truncated:
+                assert reward != 0.0
+                return
+            if terminated:
+                return
+        pytest.fail("the env never truncated at its own limit")
 
     def test_reset_is_reproducible(self, env):
         a, _ = env.reset(seed=123)
