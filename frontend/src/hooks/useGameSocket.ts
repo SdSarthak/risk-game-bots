@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { GameStateResponse } from '../api/gameApi'
 
-const WS_BASE = 'ws://localhost:8000'
+import { API_BASE } from '../api/gameApi'
+
+// Derive the socket origin from the API base so both follow VITE_API_BASE.
+const WS_BASE = API_BASE.replace(/^http/, 'ws').replace(/\/+$/, '')
 
 export function useGameSocket(gameId: string | null) {
   const [gameState, setGameState] = useState<GameStateResponse | null>(null)

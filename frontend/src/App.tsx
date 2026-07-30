@@ -75,6 +75,7 @@ export default function App() {
   const [manualState, setManualState] = useState<GameStateResponse | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [attackSrc, setAttackSrc] = useState<number | null>(null)
+  const [troops, setTroops] = useState(1)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -136,22 +137,28 @@ export default function App() {
         setAttackSrc(id)
         setSelectedId(id)
       } else if (attackSrc !== null && territory.owner !== HUMAN_PLAYER_ID) {
-        // Check adjacency
         const src = gameState.territories.find(t => t.id === attackSrc)
-        if (src && src.adjacent.includes(id)) {
-          const dice = Math.min(src.troops - 1, 3)
-          submitAction({ phase: 'ATTACK', src: attackSrc, dst: id, troops: dice })
+        if (!src) return
+        if (!src.adjacent.includes(id)) {
+          setError('That territory is not adjacent to the one you selected')
+          return
         }
+        // Never roll more dice than the garrison can spare, or than the rules allow
+        const dice = Math.max(1, Math.min(src.troops - 1, 3, troops))
+        submitAction({ phase: 'ATTACK', src: attackSrc, dst: id, troops: dice })
       }
     } else if (gameState.phase === 'FORTIFY') {
-      if (!selectedId) {
+      if (selectedId === null) {
         if (territory.owner === HUMAN_PLAYER_ID && territory.troops >= 2) setSelectedId(id)
-      } else if (territory.id !== selectedId && territory.owner === HUMAN_PLAYER_ID) {
-        submitAction({ phase: 'FORTIFY', src: selectedId, dst: id, troops: 1 })
-        setSelectedId(null)
+      } else if (id !== selectedId && territory.owner === HUMAN_PLAYER_ID) {
+        const src = gameState.territories.find(t => t.id === selectedId)
+        if (!src) return
+        // One army always has to stay behind
+        const moving = Math.max(1, Math.min(troops, src.troops - 1))
+        submitAction({ phase: 'FORTIFY', src: selectedId, dst: id, troops: moving })
       }
     }
-  }, [gameState, attackSrc, selectedId, submitAction])
+  }, [gameState, attackSrc, selectedId, troops, submitAction])
 
   if (!gameId || !gameState) {
     return (
@@ -189,6 +196,8 @@ export default function App() {
             gameState={gameState}
             selectedId={selectedId}
             humanPlayerId={HUMAN_PLAYER_ID}
+            troops={troops}
+            onTroopsChange={setTroops}
             onAction={submitAction}
             onEndPhase={handleEndPhase}
             loading={loading}

@@ -1,19 +1,24 @@
-import React, { useState } from 'react'
+import React from 'react'
 import type { GameStateResponse, ActionRequest } from '../api/gameApi'
 
 interface ActionBarProps {
   gameState: GameStateResponse
   selectedId: number | null
   humanPlayerId: number
+  /** Troop/dice count the next action will use. Owned by App so clicks on the board can read it. */
+  troops: number
+  onTroopsChange: (troops: number) => void
   onAction: (action: ActionRequest) => void
   onEndPhase: () => void
   loading: boolean
 }
 
-export function ActionBar({ gameState, selectedId, humanPlayerId,
-                             onAction, onEndPhase, loading }: ActionBarProps) {
-  const [troops, setTroops] = useState(1)
+export function ActionBar({ gameState, selectedId, humanPlayerId, troops,
+                             onTroopsChange, onAction, onEndPhase, loading }: ActionBarProps) {
   const { phase, current_player, troops_to_place, status } = gameState
+  const selected = selectedId === null
+    ? undefined
+    : gameState.territories.find(t => t.id === selectedId)
 
   if (status === 'finished') return null
   if (current_player !== humanPlayerId) {
@@ -43,56 +48,67 @@ export function ActionBar({ gameState, selectedId, humanPlayerId,
     </button>
   )
 
+  const numberInput = (max: number) => (
+    <input
+      type="number" min={1} max={max} value={Math.min(troops, max)}
+      onChange={e => onTroopsChange(clamp(Number(e.target.value), 1, max))}
+      style={inputStyle}
+    />
+  )
+
   if (phase === 'DRAFT') {
     return (
       <div style={barStyle}>
         <span style={{ color: '#ffd700' }}>Place up to {troops_to_place} troops</span>
-        <input
-          type="number" min={1} max={troops_to_place} value={troops}
-          onChange={e => setTroops(Number(e.target.value))}
-          style={inputStyle}
-        />
+        {numberInput(Math.max(1, troops_to_place))}
         {btn('Place on Selected', () => {
           if (selectedId === null) return
-          onAction({ phase: 'DRAFT', dst: selectedId, troops: Math.min(troops, troops_to_place) })
-        }, selectedId === null)}
-        {btn('End Draft', onEndPhase)}
+          onAction({ phase: 'DRAFT', dst: selectedId, troops: clamp(troops, 1, troops_to_place) })
+        }, selectedId === null || troops_to_place < 1)}
+        {btn('End Draft', onEndPhase, troops_to_place > 0)}
       </div>
     )
   }
 
   if (phase === 'ATTACK') {
+    // A garrison must leave one army behind, and Risk caps an attack at three dice
+    const maxDice = selected ? clamp(selected.troops - 1, 1, 3) : 3
     return (
       <div style={barStyle}>
-        <span style={{ color: '#aaa' }}>Select your territory, then click an enemy to attack</span>
-        <input
-          type="number" min={1} max={3} value={troops}
-          onChange={e => setTroops(Math.min(3, Math.max(1, Number(e.target.value))))}
-          style={inputStyle}
-        />
-        {btn('Attack (dice: ' + troops + ')', () => {
-          // Action is submitted from App when target is clicked
-        }, true)}
+        <span style={{ color: '#aaa' }}>
+          Select your territory, then click an adjacent enemy to attack
+        </span>
+        {numberInput(maxDice)}
+        <span style={{ color: '#888', fontSize: 13 }}>
+          dice{selected ? ` (max ${maxDice} from ${selected.name})` : ''}
+        </span>
         {btn('End Attack', onEndPhase)}
       </div>
     )
   }
 
   if (phase === 'FORTIFY') {
+    const maxMove = selected ? Math.max(1, selected.troops - 1) : 1
     return (
       <div style={barStyle}>
-        <span style={{ color: '#aaa' }}>Select source, then destination to fortify</span>
-        <input
-          type="number" min={1} value={troops}
-          onChange={e => setTroops(Math.max(1, Number(e.target.value)))}
-          style={inputStyle}
-        />
+        <span style={{ color: '#aaa' }}>
+          Select a source, then a connected territory of yours to reinforce
+        </span>
+        {numberInput(maxMove)}
+        <span style={{ color: '#888', fontSize: 13 }}>
+          troops{selected ? ` (max ${maxMove} from ${selected.name})` : ''}
+        </span>
         {btn('End Turn', onEndPhase)}
       </div>
     )
   }
 
   return null
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (Number.isNaN(value)) return min
+  return Math.min(max, Math.max(min, value))
 }
 
 const barStyle: React.CSSProperties = {

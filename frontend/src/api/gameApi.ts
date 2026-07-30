@@ -1,6 +1,10 @@
 import axios from 'axios'
 
-const BASE = 'http://localhost:8000'
+// Point the UI at a different backend with VITE_API_BASE (see .env.example).
+export const API_BASE: string =
+  import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
+
+const BASE = API_BASE.replace(/\/+$/, '')
 
 export interface PlayerConfig {
   type: 'human' | 'random' | 'rule_based' | 'mcts' | 'rl'
@@ -10,6 +14,7 @@ export interface PlayerConfig {
 export interface GameCreateRequest {
   board_config: 'small_20' | 'classic_42' | 'grid_6x6'
   players: PlayerConfig[]
+  seed?: number
 }
 
 export interface TerritoryState {
@@ -65,12 +70,30 @@ export interface ActionRequest {
   troops: number
 }
 
+export interface ActionOption {
+  phase: 'DRAFT' | 'ATTACK' | 'FORTIFY'
+  src: number
+  dst: number
+  troops: number
+  end_phase: boolean
+}
+
+export interface LegalActionsResponse {
+  game_id: string
+  current_player: number
+  phase: 'DRAFT' | 'ATTACK' | 'FORTIFY'
+  actions: ActionOption[]
+}
+
 export const gameApi = {
   createGame: (body: GameCreateRequest) =>
     axios.post<GameCreateResponse>(`${BASE}/games`, body).then(r => r.data),
 
   getGame: (gameId: string) =>
     axios.get<GameStateResponse>(`${BASE}/games/${gameId}`).then(r => r.data),
+
+  getLegalActions: (gameId: string) =>
+    axios.get<LegalActionsResponse>(`${BASE}/games/${gameId}/legal-actions`).then(r => r.data),
 
   submitAction: (gameId: string, action: ActionRequest) =>
     axios.post<GameStateResponse>(`${BASE}/games/${gameId}/action`, action).then(r => r.data),

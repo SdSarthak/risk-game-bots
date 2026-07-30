@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+MIN_PLAYERS = 2
+MAX_PLAYERS = 6
 
 
 class PlayerConfig(BaseModel):
     type: Literal["human", "random", "rule_based", "mcts", "rl"]
-    checkpoint: str | None = None  # Required only for type="rl"
+    checkpoint: str | None = None  # Optional override for type="rl"
 
 
 class GameCreateRequest(BaseModel):
     board_config: Literal["small_20", "classic_42", "grid_6x6"] = "grid_6x6"
-    players: list[PlayerConfig]  # Length 2–6
+    players: list[PlayerConfig] = Field(min_length=MIN_PLAYERS, max_length=MAX_PLAYERS)
+    seed: int | None = None  # Fixes the deal and the dice, for reproducible games
 
 
 class TerritoryState(BaseModel):
@@ -45,7 +49,23 @@ class ActionRequest(BaseModel):
     phase: str          # "DRAFT", "ATTACK", "FORTIFY"
     src: int = -1
     dst: int = -1
-    troops: int = 0
+    troops: int = 0     # -1 ends the current phase
+
+
+class ActionOption(BaseModel):
+    """One legal action, in the same shape the client posts back."""
+    phase: str
+    src: int
+    dst: int
+    troops: int
+    end_phase: bool
+
+
+class LegalActionsResponse(BaseModel):
+    game_id: str
+    current_player: int
+    phase: str
+    actions: list[ActionOption]
 
 
 class GameStateResponse(BaseModel):
