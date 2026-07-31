@@ -70,7 +70,20 @@ class RolloutBuffer:
         gamma: float,
         gae_lambda: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """GAE returns and advantages."""
+        """
+        GAE returns and advantages.
+
+        ``dones[t]`` records that step *t* ended the episode. The environment is
+        reset immediately afterwards, so ``obs[t + 1]`` — and therefore
+        ``values[t + 1]`` — belongs to a *different* episode. Bootstrapping and
+        advantage propagation must both be cut with ``dones[t]``.
+
+        Masking with ``dones[t + 1]`` instead (as an earlier version did) shifts
+        the boundary by one step: the terminal transition, the one carrying the
+        +1/-1 win-loss signal, gets ``gamma * V(first state of the next game)``
+        added to it, and the trace then runs backwards across the boundary. Both
+        errors corrupt the only unambiguous learning signal in the rollout.
+        """
         n = len(self.rewards)
         advantages = np.zeros(n, dtype=np.float32)
         last_gae = 0.0
@@ -81,9 +94,9 @@ class RolloutBuffer:
 
         for t in reversed(range(n)):
             next_val = last_value if t == n - 1 else values_np[t + 1]
-            next_done = 0.0 if t == n - 1 else dones_np[t + 1]
-            delta = rewards_np[t] + gamma * next_val * (1 - next_done) - values_np[t]
-            last_gae = delta + gamma * gae_lambda * (1 - next_done) * last_gae
+            not_done = 1.0 - dones_np[t]
+            delta = rewards_np[t] + gamma * next_val * not_done - values_np[t]
+            last_gae = delta + gamma * gae_lambda * not_done * last_gae
             advantages[t] = last_gae
 
         returns = advantages + values_np
@@ -114,7 +127,14 @@ class PPOTrainer:
         n_epochs: int = 10,           # PPO update epochs per rollout
         batch_size: int = 64,
         total_timesteps: int = 0,     # set in train() for LR schedule
+        seed: int | None = None,      # fixes the episode seed stream
     ) -> None:
+        if n_steps < 1:
+            raise ValueError("n_steps must be at least 1")
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        if n_epochs < 1:
+            raise ValueError("n_epochs must be at least 1")
         self.env = env
         self.model = model
         self._base_lr = lr
@@ -132,6 +152,10 @@ class PPOTrainer:
         self.batch_size = batch_size
 
         self.buffer = RolloutBuffer()
+        # Episodes are seeded from a counter so a --seed run replays exactly;
+        # None keeps the previous behaviour of letting the env pick its own.
+        self.seed = seed
+        self._episode_index = 0
         self._obs: np.ndarray | None = None
         self._mask: np.ndarray | None = None
         self._episode_rewards: deque = deque(maxlen=100)
@@ -141,12 +165,21 @@ class PPOTrainer:
         self._cur_ep_len = 0
         self.total_steps = 0
 
-    def _reset_env(self) -> None:
-        obs_dict, _ = self.env.reset()
+    def _next_episode_seed(self) -> int | None:
+        """A distinct, reproducible seed per episode when the run is seeded."""
+        if self.seed is None:
+            return None
+        seed = (self.seed + self._episode_index) % (2 ** 31 - 1)
+        self._episode_index += 1
+        return seed
+
+    def _reset_env(self) -> dict:
+        obs_dict, _ = self.env.reset(seed=self._next_episode_seed())
         self._obs = obs_dict["obs"]
         self._mask = obs_dict["action_mask"]
         self._cur_ep_reward = 0.0
         self._cur_ep_len = 0
+        return obs_dict
 
     def collect_rollout(self) -> None:
         """Collect n_steps transitions into self.buffer."""
@@ -187,9 +220,7 @@ class PPOTrainer:
                 # The env reports the outcome: a truncated episode can pay out
                 # positively without anyone having won.
                 self._wins.append(1 if info.get("is_win") else 0)
-                obs_dict, _ = self.env.reset()
-                self._cur_ep_reward = 0.0
-                self._cur_ep_len = 0
+                obs_dict = self._reset_env()
 
             self._obs = obs_dict["obs"]
             self._mask = obs_dict["action_mask"]
@@ -388,7 +419,20 @@ def main() -> None:
     parser.add_argument("--opponent", default="rule_based",
                         choices=["random", "rule_based", "mcts"],
                         help="Opponent agent type for training")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed torch, numpy and every episode, so a run replays exactly")
     args = parser.parse_args()
+
+    if args.timesteps < 1:
+        parser.error("--timesteps must be at least 1")
+
+    if args.seed is not None:
+        import random as _random
+        _random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
     from agents.rule_based import RuleBasedAgent
     from agents.random_agent import RandomAgent
@@ -425,12 +469,20 @@ def main() -> None:
         n_steps=args.n_steps,
         batch_size=args.batch_size,
         n_epochs=args.n_epochs,
+        seed=args.seed,
     )
 
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=DEVICE, weights_only=True)
         trainer.total_steps = ckpt.get("total_steps", 0)
-        trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
+        if "optimizer_state" in ckpt:
+            trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
+        else:
+            print("  (checkpoint carries no optimizer state; Adam restarts cold)")
+        if trainer.total_steps >= args.timesteps:
+            print(f"Checkpoint is already at {trainer.total_steps:,} steps, which meets "
+                  f"--timesteps {args.timesteps:,}. Raise --timesteps to train further.")
+            return
 
     trainer.train(
         total_timesteps=args.timesteps,
