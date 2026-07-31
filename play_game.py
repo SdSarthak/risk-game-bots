@@ -73,8 +73,11 @@ def run_game(board: BoardConfig, agents: list[BaseAgent], seed: int,
     state = GameState.new_game(board, num_players=len(agents), seed=seed)
     engine = RulesEngine(board, num_players=len(agents), seed=seed)
 
+    # Re-seed the agents too: without this a `--seed` run fixes the deal and
+    # the dice but not the agents' own choices, and the same command prints a
+    # different result every time.
     for agent in agents:
-        agent.reset()
+        agent.reset(seed=seed)
 
     steps = 0
     while not engine.is_terminal(state) and steps < max_steps:

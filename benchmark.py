@@ -53,8 +53,9 @@ def run_game(board, agents_list, seed, max_steps=DEFAULT_MAX_STEPS):
     state = GameState.new_game(board, num_players=len(agents_list), seed=seed)
     engine = RulesEngine(board, num_players=len(agents_list), seed=seed)
 
+    # Seeded per game so a benchmark run is reproducible end to end
     for agent in agents_list:
-        agent.reset()
+        agent.reset(seed=seed)
 
     for _ in range(max_steps):
         if engine.is_terminal(state):

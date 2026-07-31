@@ -57,9 +57,11 @@ class SelfPlayTrainer:
         if (not self._checkpoint_pool
                 or self._rng.random() < self.BASELINE_OPPONENT_PROBABILITY):
             return RuleBasedAgent(1)
+        # Chosen before the try: referencing it from the handler when the import
+        # itself failed raised NameError over the top of the real error.
+        path = self._rng.choice(list(self._checkpoint_pool))
         try:
             from agents.rl_agent import RLAgent
-            path = self._rng.choice(list(self._checkpoint_pool))
             return RLAgent.load(1, path)
         except Exception:  # noqa: BLE001 - torch raises many types for a bad file
             log.warning("Could not load checkpoint %s; using the baseline opponent",

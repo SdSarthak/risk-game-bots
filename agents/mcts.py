@@ -100,7 +100,10 @@ class MCTSAgent(BaseAgent):
         self._encoder: RiskActionSpace | None = None
         self._board = None
 
-    def reset(self) -> None:
+    def reset(self, seed: int | None = None) -> None:
+        if seed is not None:
+            # The search engine is rebuilt below, so this takes effect at once
+            self.seed = seed + self.player_id
         self._engine = None
         self._encoder = None
         self._board = None

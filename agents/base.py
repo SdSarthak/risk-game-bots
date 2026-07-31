@@ -14,8 +14,14 @@ class BaseAgent(ABC):
         """Select one action from the list of legal actions."""
         ...
 
-    def reset(self) -> None:
-        """Called at the start of a new game. Override to reset internal state."""
+    def reset(self, seed: int | None = None) -> None:
+        """
+        Called at the start of a new game.
+
+        Agents that make their own random choices must re-seed from `seed` when
+        one is given; otherwise a driver's `--seed` fixes only the deal and the
+        dice, and the same command produces a different result every run.
+        """
         pass
 
     def __repr__(self) -> str:

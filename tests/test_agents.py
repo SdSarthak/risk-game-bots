@@ -172,3 +172,64 @@ class TestCheckpointLocator:
         pytest.importorskip("torch")
         (tmp_path / "risk_ppo_100000.pt").write_text("not a checkpoint")
         assert find_latest_checkpoint(tmp_path) is None
+
+
+class TestSeedingReproducesAMatch:
+    """
+    A driver's `--seed` fixes the deal and the dice, but an agent that makes its
+    own random choices also has to be re-seeded — otherwise the same command
+    prints a different result on every run.
+    """
+
+    def _play(self, board, seed):
+        from play_game import run_game
+
+        agents = [RandomAgent(0), RandomAgent(1)]
+        winners = [run_game(board, agents, seed=seed + g, max_steps=4000)
+                   for g in range(4)]
+        return winners
+
+    def test_the_same_seed_gives_the_same_games(self, small_board):
+        assert self._play(small_board, 0) == self._play(small_board, 0)
+
+    def test_a_different_seed_is_allowed_to_differ(self, small_board):
+        # Not a guarantee for any single seed, but over four games a collision
+        # would be a coincidence worth knowing about
+        assert self._play(small_board, 0) != self._play(small_board, 1000)
+
+    def test_reset_reseeds_the_stream(self, small_board):
+        state = GameState.new_game(small_board, num_players=2, seed=1)
+        engine = RulesEngine(small_board, num_players=2, seed=1)
+        legal = engine.legal_actions(state)
+
+        agent = RandomAgent(0)
+        agent.reset(seed=42)
+        first = [agent.choose_action(state, legal) for _ in range(10)]
+        agent.reset(seed=42)
+        assert [agent.choose_action(state, legal) for _ in range(10)] == first
+
+    def test_reset_without_a_seed_keeps_the_configured_one(self, small_board):
+        state = GameState.new_game(small_board, num_players=2, seed=1)
+        engine = RulesEngine(small_board, num_players=2, seed=1)
+        legal = engine.legal_actions(state)
+
+        agent = RandomAgent(0, seed=7)
+        first = [agent.choose_action(state, legal) for _ in range(5)]
+        agent.reset()
+        assert [agent.choose_action(state, legal) for _ in range(5)] == first
+
+    def test_two_seats_do_not_share_one_action_stream(self, small_board):
+        state = GameState.new_game(small_board, num_players=2, seed=1)
+        engine = RulesEngine(small_board, num_players=2, seed=1)
+        legal = engine.legal_actions(state)
+
+        p0, p1 = RandomAgent(0), RandomAgent(1)
+        p0.reset(seed=5)
+        p1.reset(seed=5)
+        assert ([p0.choose_action(state, legal) for _ in range(10)]
+                != [p1.choose_action(state, legal) for _ in range(10)])
+
+    def test_no_legal_actions_is_an_error_not_an_indexerror(self, small_game):
+        state, _ = small_game
+        with pytest.raises(ValueError, match="no legal actions"):
+            RandomAgent(0).choose_action(state, [])
