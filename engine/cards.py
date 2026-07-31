@@ -50,7 +50,15 @@ class CardDeck:
     def find_valid_set(hand: list[CardType]) -> list[int] | None:
         """
         Find indices of a valid tradeable set of 3 cards from hand.
-        Valid sets: 3 of same type, or 1 of each type, or any 2 + 1 wild.
+
+        A set is three cards that are all the same type or all different types,
+        with a wild standing in for whatever the set needs. That makes *any* two
+        non-wild cards plus a wild a set: two of a kind become three of a kind,
+        and two different types become one of each. Requiring the two non-wild
+        cards to match — as an earlier version did — silently refused hands like
+        infantry + cavalry + wild, so the bonus went uncollected and a hand over
+        the limit could never be brought back under it.
+
         Returns card indices if found, else None.
         """
         if len(hand) < 3:
@@ -65,9 +73,11 @@ class CardDeck:
         infantry = by_type.get(CardType.INFANTRY, [])
         cavalry = by_type.get(CardType.CAVALRY, [])
         artillery = by_type.get(CardType.ARTILLERY, [])
+        non_wild = sorted(infantry + cavalry + artillery)
 
-        # 3 of a kind (no wilds needed)
-        for group in [infantry, cavalry, artillery]:
+        # Prefer sets that spend no wilds, so the wilds stay available.
+        # 3 of a kind
+        for group in (infantry, cavalry, artillery):
             if len(group) >= 3:
                 return group[:3]
 
@@ -75,20 +85,15 @@ class CardDeck:
         if infantry and cavalry and artillery:
             return [infantry[0], cavalry[0], artillery[0]]
 
-        # 2 matching + 1 wild
-        if wilds:
-            for group in [infantry, cavalry, artillery]:
-                if len(group) >= 2:
-                    return group[:2] + wilds[:1]
-            # 1 non-wild + 2 wilds... not valid in standard Risk, skip
+        # Any 2 non-wilds + 1 wild: the wild completes either shape
+        if wilds and len(non_wild) >= 2:
+            return non_wild[:2] + wilds[:1]
 
-        # 1 type + 2 wilds
-        if len(wilds) >= 2:
-            for group in [infantry, cavalry, artillery]:
-                if group:
-                    return group[:1] + wilds[:2]
+        # 1 non-wild + 2 wilds
+        if len(wilds) >= 2 and non_wild:
+            return non_wild[:1] + wilds[:2]
 
-        # 3 wilds (non-standard but handle it)
+        # 3 wilds (only reachable on a non-standard deck, but well defined)
         if len(wilds) >= 3:
             return wilds[:3]
 

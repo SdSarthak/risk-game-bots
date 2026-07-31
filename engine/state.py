@@ -183,6 +183,10 @@ class GameState:
 
     def controls_continent(self, player: int, continent: str) -> bool:
         members = self.board.territories_in_continent(continent)
+        # `all()` over an empty list is True, which would hand an unknown or
+        # empty continent's bonus to every player on every turn.
+        if not members:
+            return False
         return all(self.owners[t] == player for t in members)
 
     def active_players(self) -> list[int]:

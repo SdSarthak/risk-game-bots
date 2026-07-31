@@ -2,7 +2,7 @@
 import pytest
 
 from engine.cards import CardDeck
-from engine.constants import CARD_TRADE_BONUS_CAP, CardType, Phase
+from engine.constants import CARD_TRADE_BONUS_CAP, MAX_CARDS_IN_HAND, CardType, Phase
 from engine.rules import Action, RulesEngine
 from engine.state import MAX_PLAYERS, GameState
 
@@ -417,6 +417,29 @@ class TestCardTrading:
         after = self._end_turn(engine, state)
         assert after.troops_to_place == after.reinforcements_for(1) + 8
 
+    def test_hand_over_the_limit_is_always_brought_back_under_it(self, small_board):
+        """
+        The forced-trade rule is only enforceable if every over-limit hand has a
+        set in it. A hand like infantry + cavalry + wild used to be judged
+        untradeable, so a player could sit above the limit indefinitely.
+        """
+        import itertools
+        engine = RulesEngine(small_board, 2, seed=3, eager_card_trades=False)
+        for hand in itertools.combinations_with_replacement(list(CardType), 6):
+            state = GameState.new_game(small_board, num_players=2, seed=3)
+            state.cards[0] = list(hand)
+            engine.auto_trade_cards(state, 0)
+            assert len(state.cards[0]) <= MAX_CARDS_IN_HAND, hand
+
+    def test_lazy_trading_stops_at_the_limit(self, small_board):
+        engine = RulesEngine(small_board, 2, seed=3, eager_card_trades=False)
+        state = GameState.new_game(small_board, num_players=2, seed=3)
+        state.cards[0] = [CardType.INFANTRY, CardType.CAVALRY, CardType.WILD,
+                          CardType.ARTILLERY, CardType.INFANTRY, CardType.CAVALRY]
+        bonus = engine.auto_trade_cards(state, 0)
+        assert len(state.cards[0]) == 3  # exactly one set cashed in
+        assert bonus > 0
+
     def test_manual_trade_rejects_bad_indices(self, small_game):
         state, engine = small_game
         state.cards[0] = [CardType.INFANTRY, CardType.CAVALRY, CardType.ARTILLERY]
@@ -532,6 +555,43 @@ class TestCardDeck:
         hand = [CardType.WILD, CardType.WILD, CardType.CAVALRY, CardType.ARTILLERY]
         result = CardDeck.find_valid_set(hand)
         assert result is not None
+        assert len(set(result)) == 3
+
+    def test_find_valid_set_wild_completes_two_different_types(self):
+        """A wild stands in for the missing third type, so this is a set."""
+        hand = [CardType.INFANTRY, CardType.CAVALRY, CardType.WILD]
+        result = CardDeck.find_valid_set(hand)
+        assert result is not None
+        assert sorted(result) == [0, 1, 2]
+
+    @pytest.mark.parametrize("hand", [
+        [CardType.INFANTRY, CardType.ARTILLERY, CardType.WILD],
+        [CardType.CAVALRY, CardType.ARTILLERY, CardType.WILD],
+        [CardType.WILD, CardType.CAVALRY, CardType.ARTILLERY],
+        [CardType.INFANTRY, CardType.WILD, CardType.CAVALRY],
+    ])
+    def test_every_two_non_wilds_plus_a_wild_is_a_set(self, hand):
+        result = CardDeck.find_valid_set(hand)
+        assert result is not None
+        assert len(set(result)) == 3
+
+    def test_a_full_hand_always_yields_a_set(self):
+        """
+        Six cards over the hand limit must always be tradeable down; by the
+        pigeonhole principle three of the four types force either a triple or
+        one of each, and any wild completes whatever is left.
+        """
+        import itertools
+        types = list(CardType)
+        for hand in itertools.combinations_with_replacement(types, 6):
+            assert CardDeck.find_valid_set(list(hand)) is not None, hand
+
+    def test_found_indices_address_real_cards(self):
+        hand = [CardType.WILD, CardType.INFANTRY, CardType.CAVALRY,
+                CardType.INFANTRY, CardType.WILD]
+        result = CardDeck.find_valid_set(hand)
+        assert result is not None
+        assert all(0 <= i < len(hand) for i in result)
         assert len(set(result)) == 3
 
     def test_trade_bonuses_escalate(self):
