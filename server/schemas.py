@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 MIN_PLAYERS = 2
 MAX_PLAYERS = 6
 
+# Cap on how many legal actions one response may carry
+DEFAULT_ACTION_LIMIT = 500
+MAX_ACTION_LIMIT = 20_000
+
 
 class PlayerConfig(BaseModel):
     type: Literal["human", "random", "rule_based", "mcts", "rl"]
@@ -66,6 +70,11 @@ class LegalActionsResponse(BaseModel):
     current_player: int
     phase: str
     actions: list[ActionOption]
+    # The full list is combinatorial in troop counts (a late-game fortify phase
+    # on classic_42 reaches ~10^5 entries, several megabytes of JSON), so the
+    # response is capped and says so rather than shipping all of it.
+    truncated: bool = False
+    limit: int = DEFAULT_ACTION_LIMIT
 
 
 class GameStateResponse(BaseModel):

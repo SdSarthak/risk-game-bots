@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from engine.board import BoardConfig
@@ -70,8 +71,93 @@ class RulesEngine:
             return self._legal_fortify_actions(state)
         return []
 
+    def iter_legal_actions(self, state: GameState) -> Iterator[Action]:
+        """
+        Legal actions one at a time, in the same order as `legal_actions`.
+
+        The full list is combinatorial in troop counts — a late-game fortify
+        phase on the classic board enumerates tens of thousands of "move n
+        troops from A to B" variants — so callers that only need a bounded
+        sample (the API's move picker, for one) should take from here instead
+        of materialising all of them.
+        """
+        if state.phase == Phase.DRAFT:
+            yield from self._iter_draft_actions(state)
+        elif state.phase == Phase.ATTACK:
+            yield from self._iter_attack_actions(state)
+        elif state.phase == Phase.FORTIFY:
+            yield from self._iter_fortify_actions(state)
+
+    def is_legal(self, state: GameState, action: Action) -> bool:
+        """
+        Whether `action` is one the engine currently offers.
+
+        Answers in time proportional to the board rather than to the number of
+        legal actions, so validating a submitted move never has to build the
+        whole list. Kept exactly equivalent to `action in legal_actions(state)`
+        — `tests/test_engine.py` checks the two agree.
+        """
+        if action.phase != state.phase:
+            return False
+        player = state.current_player
+
+        if state.phase == Phase.DRAFT:
+            owned = state.territories_of(player)
+            if action.is_end_phase():
+                # The draft is skippable only once there is nothing placeable
+                return (state.troops_to_place <= 0 or not owned) and action.src == -1 \
+                    and action.dst == -1
+            if state.troops_to_place <= 0 or not owned:
+                return False
+            return (action.src == -1
+                    and 0 <= action.dst < state.board.num_territories
+                    and state.owners[action.dst] == player
+                    and 1 <= action.troops <= state.troops_to_place)
+
+        if state.phase == Phase.ATTACK:
+            if action.is_end_phase():
+                return action.src == -1 and action.dst == -1
+            if not (0 <= action.src < state.board.num_territories
+                    and 0 <= action.dst < state.board.num_territories):
+                return False
+            if state.owners[action.src] != player or state.owners[action.dst] == player:
+                return False
+            if state.troops[action.src] < MIN_TROOPS_TO_ATTACK:
+                return False
+            if action.dst not in self.board.adjacent_to(action.src):
+                return False
+            max_dice = min(state.troops[action.src] - 1, MAX_ATTACK_DICE)
+            return 1 <= action.troops <= max_dice
+
+        if state.phase == Phase.FORTIFY:
+            if action.is_end_phase():
+                return action.src == -1 and action.dst == -1
+            if not (0 <= action.src < state.board.num_territories
+                    and 0 <= action.dst < state.board.num_territories):
+                return False
+            if action.src == action.dst:
+                return False
+            if state.owners[action.src] != player or state.owners[action.dst] != player:
+                return False
+            movable = state.troops[action.src] - MIN_TROOPS
+            if not 1 <= action.troops <= movable:
+                return False
+            my_set = set(state.territories_of(player))
+            return action.dst in self._reachable_friendly(state, action.src,
+                                                          player, my_set)
+
+        return False
+
     def _legal_draft_actions(self, state: GameState) -> list[Action]:
-        actions = []
+        return list(self._iter_draft_actions(state))
+
+    def _legal_attack_actions(self, state: GameState) -> list[Action]:
+        return list(self._iter_attack_actions(state))
+
+    def _legal_fortify_actions(self, state: GameState) -> list[Action]:
+        return list(self._iter_fortify_actions(state))
+
+    def _iter_draft_actions(self, state: GameState) -> Iterator[Action]:
         player = state.current_player
         my_territories = state.territories_of(player)
         remaining = state.troops_to_place
@@ -81,15 +167,15 @@ class RulesEngine:
             # allotment gets an empty legal-action list, and every driver
             # (play_game, benchmark, the API's bot loop) reads that as a wedged
             # game and abandons it.
-            return [Action(phase=Phase.DRAFT, troops=-1)]
+            yield Action(phase=Phase.DRAFT, troops=-1)
+            return
         # Place 1..remaining troops on any owned territory
         for t in my_territories:
             for n in range(1, remaining + 1):
-                actions.append(Action(phase=Phase.DRAFT, dst=t, troops=n))
-        return actions
+                yield Action(phase=Phase.DRAFT, dst=t, troops=n)
 
-    def _legal_attack_actions(self, state: GameState) -> list[Action]:
-        actions = [Action(phase=Phase.ATTACK, troops=-1)]  # always can end attack
+    def _iter_attack_actions(self, state: GameState) -> Iterator[Action]:
+        yield Action(phase=Phase.ATTACK, troops=-1)  # always can end attack
         player = state.current_player
         for src in state.territories_of(player):
             if state.troops[src] < MIN_TROOPS_TO_ATTACK:
@@ -98,11 +184,10 @@ class RulesEngine:
                 if state.owners[dst] != player:
                     max_dice = min(state.troops[src] - 1, MAX_ATTACK_DICE)
                     for dice in range(1, max_dice + 1):
-                        actions.append(Action(phase=Phase.ATTACK, src=src, dst=dst, troops=dice))
-        return actions
+                        yield Action(phase=Phase.ATTACK, src=src, dst=dst, troops=dice)
 
-    def _legal_fortify_actions(self, state: GameState) -> list[Action]:
-        actions = [Action(phase=Phase.FORTIFY, troops=-1)]  # always can end/skip
+    def _iter_fortify_actions(self, state: GameState) -> Iterator[Action]:
+        yield Action(phase=Phase.FORTIFY, troops=-1)  # always can end/skip
         player = state.current_player
         my_territories = state.territories_of(player)
         my_set = set(my_territories)
@@ -116,8 +201,7 @@ class RulesEngine:
                 if dst == src:
                     continue
                 for n in range(1, movable + 1):
-                    actions.append(Action(phase=Phase.FORTIFY, src=src, dst=dst, troops=n))
-        return actions
+                    yield Action(phase=Phase.FORTIFY, src=src, dst=dst, troops=n)
 
     def _reachable_friendly(self, state: GameState, start: int, player: int,
                              my_set: set[int]) -> set[int]:

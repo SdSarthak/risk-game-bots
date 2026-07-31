@@ -83,6 +83,9 @@ export interface LegalActionsResponse {
   current_player: number
   phase: 'DRAFT' | 'ATTACK' | 'FORTIFY'
   actions: ActionOption[]
+  /** The server caps the list; true when more legal moves exist than were sent. */
+  truncated: boolean
+  limit: number
 }
 
 export const gameApi = {
@@ -92,8 +95,11 @@ export const gameApi = {
   getGame: (gameId: string) =>
     axios.get<GameStateResponse>(`${BASE}/games/${gameId}`).then(r => r.data),
 
-  getLegalActions: (gameId: string) =>
-    axios.get<LegalActionsResponse>(`${BASE}/games/${gameId}/legal-actions`).then(r => r.data),
+  getLegalActions: (gameId: string, limit?: number) =>
+    axios
+      .get<LegalActionsResponse>(`${BASE}/games/${gameId}/legal-actions`,
+        limit === undefined ? undefined : { params: { limit } })
+      .then(r => r.data),
 
   submitAction: (gameId: string, action: ActionRequest) =>
     axios.post<GameStateResponse>(`${BASE}/games/${gameId}/action`, action).then(r => r.data),

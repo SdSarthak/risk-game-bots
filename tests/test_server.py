@@ -186,3 +186,135 @@ class TestConfiguration:
         ids = [manager.create_game(request)[0] for _ in range(6)]
         assert manager.get_session(ids[0]) is None
         assert manager.get_session(ids[-1]) is not None
+
+
+class TestLegalActionsAreBounded:
+    """
+    The legal-action list is combinatorial in troop counts: a late-game fortify
+    phase on classic_42 enumerates ~10^5 "move n troops from A to B" variants,
+    several megabytes of JSON. The endpoint must cap what it ships.
+    """
+
+    def _late_game_session(self, client, troops=60):
+        from engine.constants import Phase
+
+        game_id = create(client, board="classic_42")
+        manager = client.app.state.game_manager
+        session = manager.get_session(game_id)
+        state = session.state
+        state.owners = [0] * (session.board.num_territories - 1) + [1]
+        state.troops = [troops] * session.board.num_territories
+        state.phase = Phase.FORTIFY
+        state.current_player = 0
+        return game_id, session
+
+    def test_response_is_capped_and_says_so(self, client):
+        game_id, _ = self._late_game_session(client)
+        body = client.get(f"/games/{game_id}/legal-actions").json()
+        assert body["truncated"] is True
+        assert len(body["actions"]) == body["limit"] == 500
+
+    def test_limit_is_honoured(self, client):
+        game_id, _ = self._late_game_session(client)
+        body = client.get(f"/games/{game_id}/legal-actions?limit=10").json()
+        assert len(body["actions"]) == 10
+        assert body["truncated"] is True
+
+    def test_a_short_list_is_not_marked_truncated(self, client):
+        game_id = create(client)
+        body = client.get(f"/games/{game_id}/legal-actions").json()
+        assert body["truncated"] is False
+        assert len(body["actions"]) < body["limit"]
+
+    def test_response_stays_small(self, client):
+        """Before the cap this body was ~7 MB."""
+        game_id, _ = self._late_game_session(client)
+        response = client.get(f"/games/{game_id}/legal-actions")
+        assert len(response.content) < 200_000
+
+    @pytest.mark.parametrize("limit", [0, -1, 10 ** 9])
+    def test_out_of_range_limits_are_refused(self, client, limit):
+        game_id = create(client)
+        assert client.get(
+            f"/games/{game_id}/legal-actions?limit={limit}").status_code == 422
+
+    def test_capped_actions_are_still_playable(self, client):
+        game_id, session = self._late_game_session(client)
+        body = client.get(f"/games/{game_id}/legal-actions?limit=25").json()
+        for option in body["actions"]:
+            from engine.constants import Phase
+            from engine.rules import Action
+            action = Action(phase=Phase[option["phase"]], src=option["src"],
+                            dst=option["dst"], troops=option["troops"])
+            assert session.engine.is_legal(session.state, action)
+
+
+class TestConcurrentAccess:
+    """
+    FastAPI runs sync endpoints in a threadpool, so two requests for the same
+    game genuinely overlap. Without a session lock both read the same state and
+    the second write silently discards the first player's move.
+    """
+
+    def test_parallel_bot_steps_do_not_lose_moves(self, client):
+        import concurrent.futures
+
+        game_id = create(client, players=BOTS_ONLY)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = [f.result() for f in [
+                pool.submit(client.post, f"/games/{game_id}/step") for _ in range(8)
+            ]]
+        assert all(r.status_code == 200 for r in results)
+        state = client.get(f"/games/{game_id}").json()
+        assert sum(p["territory_count"] for p in state["players"]) == 20
+
+    def test_parallel_reads_return_consistent_states(self, client):
+        import concurrent.futures
+
+        game_id = create(client, players=BOTS_ONLY)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            bodies = [f.result().json() for f in
+                      [pool.submit(client.get, f"/games/{game_id}") for _ in range(16)]]
+        for body in bodies:
+            # Territory counts must add up within a single response
+            assert (sum(p["territory_count"] for p in body["players"])
+                    == len(body["territories"]))
+
+
+class TestServerBotBudget:
+    def test_mcts_bots_are_budgeted_in_rollouts_not_seconds(self, client):
+        """A wall-clock budget times a 5000-step ceiling is over an hour."""
+        from server.game_manager import GameManager, SERVER_MCTS_SIMULATIONS
+        from server.schemas import GameCreateRequest, PlayerConfig
+
+        manager = GameManager()
+        request = GameCreateRequest(board_config="small_20", seed=3,
+                                    players=[PlayerConfig(type="human"),
+                                             PlayerConfig(type="mcts")])
+        _, session = manager.create_game(request)
+        agent = session.agents[1]
+        assert agent.num_simulations == SERVER_MCTS_SIMULATIONS
+
+    def test_a_bad_checkpoint_is_a_client_error_not_a_500(self, client, tmp_path):
+        broken = tmp_path / "broken.pt"
+        broken.write_text("not a torch checkpoint")
+        response = client.post("/games", json={
+            "board_config": "small_20",
+            "players": [{"type": "human"},
+                        {"type": "rl", "checkpoint": str(broken)}]})
+        assert response.status_code == 400
+
+    def test_a_missing_checkpoint_is_a_client_error(self, client, tmp_path):
+        response = client.post("/games", json={
+            "board_config": "small_20",
+            "players": [{"type": "human"},
+                        {"type": "rl", "checkpoint": str(tmp_path / "nope.pt")}]})
+        assert response.status_code == 400
+        assert "not found" in response.json()["detail"].lower()
+
+    def test_a_directory_is_not_mistaken_for_a_checkpoint(self, client, tmp_path):
+        response = client.post("/games", json={
+            "board_config": "small_20",
+            "players": [{"type": "human"},
+                        {"type": "rl", "checkpoint": str(tmp_path)}]})
+        assert response.status_code == 400

@@ -359,6 +359,98 @@ class TestRulesEngine:
 # Card trading during play
 # ------------------------------------------------------------------
 
+class TestIsLegal:
+    """
+    `is_legal` exists so a submitted move can be validated without building the
+    whole legal-action list, which is combinatorial in troop counts. It is only
+    useful if it agrees with that list exactly, in both directions.
+    """
+
+    def _states(self, board):
+        """A spread of real positions: every phase, several turns in."""
+        import random as _random
+
+        rng = _random.Random(4)
+        engine = RulesEngine(board, 2, seed=4)
+        state = GameState.new_game(board, num_players=2, seed=4)
+        seen = []
+        for _ in range(120):
+            if engine.is_terminal(state):
+                break
+            seen.append(state)
+            legal = engine.legal_actions(state)
+            state = engine.apply_action(state, rng.choice(legal))
+        return engine, seen
+
+    def test_accepts_every_action_the_engine_offers(self, small_board):
+        engine, states = self._states(small_board)
+        for state in states:
+            for action in engine.legal_actions(state):
+                assert engine.is_legal(state, action), action
+
+    def test_rejects_actions_from_other_states(self, small_board):
+        """Actions legal elsewhere must not be waved through here."""
+        engine, states = self._states(small_board)
+        for i, state in enumerate(states):
+            other = states[(i + 7) % len(states)]
+            offered = set(engine.legal_actions(state))
+            for action in engine.legal_actions(other):
+                assert engine.is_legal(state, action) == (action in offered), action
+
+    @pytest.mark.parametrize("bad", [
+        Action(phase=Phase.ATTACK, src=-5, dst=0, troops=1),
+        Action(phase=Phase.ATTACK, src=0, dst=999, troops=1),
+        Action(phase=Phase.FORTIFY, src=0, dst=0, troops=1),
+        Action(phase=Phase.DRAFT, dst=0, troops=0),
+        Action(phase=Phase.DRAFT, dst=0, troops=-3),
+        Action(phase=Phase.DRAFT, dst=999, troops=1),
+    ])
+    def test_rejects_malformed_actions_without_crashing(self, small_game, bad):
+        state, engine = small_game
+        for phase in Phase:
+            state.phase = phase
+            assert engine.is_legal(state, bad) is False
+
+    def test_rejects_an_action_for_the_wrong_phase(self, small_game):
+        state, engine = small_game
+        state.phase = Phase.DRAFT
+        assert not engine.is_legal(state, Action(phase=Phase.ATTACK, troops=-1))
+
+    def test_rejects_fortifying_across_a_gap(self, small_board):
+        """A fortify has to travel through friendly ground, not teleport."""
+        state = GameState.new_game(small_board, num_players=2, seed=4)
+        engine = RulesEngine(small_board, 2, seed=4)
+        state.phase = Phase.FORTIFY
+        state.current_player = 0
+        state.owners = [1] * small_board.num_territories
+        far = [t for t in range(small_board.num_territories)
+               if t != 0 and 0 not in small_board.adjacent_to(t)]
+        state.owners[0] = 0
+        state.owners[far[-1]] = 0
+        state.troops[0] = 5
+        assert not engine.is_legal(
+            state, Action(phase=Phase.FORTIFY, src=0, dst=far[-1], troops=2))
+
+    def test_iter_matches_the_list(self, small_board):
+        engine, states = self._states(small_board)
+        for state in states:
+            assert list(engine.iter_legal_actions(state)) == engine.legal_actions(state)
+
+    def test_iter_is_lazy(self, small_board):
+        """Taking a handful must not pay for the whole combinatorial list."""
+        import itertools
+
+        state = GameState.new_game(small_board, num_players=2, seed=4)
+        engine = RulesEngine(small_board, 2, seed=4)
+        state.phase = Phase.FORTIFY
+        state.current_player = 0
+        state.owners = [0] * small_board.num_territories
+        state.troops = [400] * small_board.num_territories
+        first = list(itertools.islice(engine.iter_legal_actions(state), 5))
+        assert len(first) == 5
+        assert all(engine.is_legal(state, a) for a in first)
+
+
 class TestCardTrading:
     def _end_turn(self, engine, state):
         return engine.apply_action(state, Action(phase=Phase.FORTIFY, troops=-1))

@@ -1,10 +1,10 @@
 """REST endpoints for game management."""
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.game_manager import GameManager
 from server.schemas import (
-    ActionRequest, GameCreateRequest, GameCreateResponse,
-    GameStateResponse, LegalActionsResponse,
+    ActionRequest, DEFAULT_ACTION_LIMIT, GameCreateRequest, GameCreateResponse,
+    GameStateResponse, LegalActionsResponse, MAX_ACTION_LIMIT,
 )
 
 router = APIRouter(prefix="/games", tags=["games"])
@@ -39,10 +39,20 @@ def get_game(game_id: str, request: Request):
 
 
 @router.get("/{game_id}/legal-actions", response_model=LegalActionsResponse)
-def get_legal_actions(game_id: str, request: Request):
-    """Every action the player to move may take — drives the UI's move picker."""
+def get_legal_actions(
+    game_id: str,
+    request: Request,
+    limit: int = Query(DEFAULT_ACTION_LIMIT, ge=1, le=MAX_ACTION_LIMIT,
+                       description="Cap on actions returned; `truncated` says if more exist"),
+):
+    """
+    The actions the player to move may take — drives the UI's move picker.
+
+    Capped: the full list is combinatorial in troop counts and reaches ~10^5
+    entries (several MB of JSON) in a late-game fortify phase.
+    """
     manager, session = get_session(request, game_id)
-    return manager.build_legal_actions(session)
+    return manager.build_legal_actions(session, limit=limit)
 
 
 @router.post("/{game_id}/action", response_model=GameStateResponse)
@@ -50,6 +60,8 @@ def submit_action(game_id: str, body: ActionRequest, request: Request):
     manager, _ = get_session(request, game_id)
     try:
         return manager.apply_human_action(game_id, body)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Game not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -58,4 +70,7 @@ def submit_action(game_id: str, body: ActionRequest, request: Request):
 def step_bots(game_id: str, request: Request):
     """Advance the game by running every pending bot turn (for all-bot games)."""
     manager, _ = get_session(request, game_id)
-    return manager.step_bots(game_id)
+    try:
+        return manager.step_bots(game_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Game not found") from exc
