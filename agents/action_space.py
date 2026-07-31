@@ -95,8 +95,9 @@ class RiskActionSpace:
         if not 0 <= index < ACTION_SPACE_SIZE:
             return None
         if index == END_PHASE_INDEX:
-            if state.phase is Phase.DRAFT and state.troops_to_place > 0:
-                return None  # the draft cannot be skipped while armies are unplaced
+            if (state.phase is Phase.DRAFT and state.troops_to_place > 0
+                    and state.territories_of(state.current_player)):
+                return None  # the draft cannot be skipped while armies are placeable
             return Action(phase=state.phase, troops=-1)
 
         player = state.current_player
@@ -155,10 +156,14 @@ class RiskActionSpace:
         player = state.current_player
 
         if state.phase is Phase.DRAFT:
-            if state.troops_to_place > 0:
-                for territory in state.territories_of(player):
+            owned = state.territories_of(player)
+            if state.troops_to_place > 0 and owned:
+                for territory in owned:
                     mask[self.draft_index(territory)] = 1
             else:
+                # No allotment left, or nowhere to put it: ending is the only
+                # move. Leaving the mask empty here hands the policy a row with
+                # nothing legal in it.
                 mask[END_PHASE_INDEX] = 1
             return mask
 

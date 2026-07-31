@@ -75,8 +75,12 @@ class RulesEngine:
         player = state.current_player
         my_territories = state.territories_of(player)
         remaining = state.troops_to_place
-        if remaining <= 0:
-            # Must move to attack phase
+        if remaining <= 0 or not my_territories:
+            # Nothing left to place, or nowhere to place it: move to attack.
+            # Without the second case a player holding no ground but a pending
+            # allotment gets an empty legal-action list, and every driver
+            # (play_game, benchmark, the API's bot loop) reads that as a wedged
+            # game and abandons it.
             return [Action(phase=Phase.DRAFT, troops=-1)]
         # Place 1..remaining troops on any owned territory
         for t in my_territories:

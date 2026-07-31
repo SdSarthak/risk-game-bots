@@ -190,6 +190,93 @@ class TestRiskEnv:
         b, _ = env.reset(seed=123)
         assert np.array_equal(a["obs"], b["obs"])
 
+    @pytest.mark.parametrize("kwargs", [
+        {"num_players": 1}, {"max_episode_steps": 0}, {"max_opponent_steps": 0},
+    ])
+    def test_rejects_impossible_settings(self, kwargs):
+        with pytest.raises(ValueError):
+            RiskEnv(config_name="small_20", **kwargs)
+
+
+class TestEliminationEndsTheEpisode:
+    """
+    With three or more players, being knocked out does not end the *game*. The
+    env must still end the *episode*: the loop that runs opponents can never
+    come back round to a player who is out, so without this the rest of the
+    game is played inside a single step() the agent cannot influence.
+    """
+
+    def _knocked_out_env(self, seed=0):
+        env = RiskEnv(config_name="small_20", num_players=3)
+        env.reset(seed=seed)
+        state = env._state
+        for tid in state.territories_of(0):
+            state.owners[tid] = 1
+        state.eliminated[0] = True
+        state.troops_to_place = 0
+        return env
+
+    def test_step_reports_termination(self):
+        env = self._knocked_out_env()
+        _, reward, terminated, truncated, info = env.step(0)
+        assert terminated
+        assert not truncated
+        assert reward == pytest.approx(-1.0)
+        assert info == {"is_win": False, "is_loss": True}
+
+    def test_the_game_is_not_played_out_inside_one_step(self):
+        env = self._knocked_out_env()
+        before = env._state.turn_number
+        env.step(0)
+        # A handful of turns at most, not the hundreds it takes to finish
+        assert env._state.turn_number - before <= 2
+        assert not env._engine.is_terminal(env._state)
+
+    def test_opponent_loop_stops_when_we_are_out(self):
+        env = self._knocked_out_env()
+        env._state.current_player = 1
+        state = env._run_opponents_until_our_turn()
+        assert state.eliminated[0]
+        assert state.current_player != 0
+
+    def test_opponent_loop_respects_its_budget(self):
+        env = RiskEnv(config_name="small_20", num_players=3, max_opponent_steps=3)
+        env.reset(seed=1)
+        env._state.current_player = 1
+        before = env._state.turn_number
+        state = env._run_opponents_until_our_turn()
+        # Three decisions cannot cover three whole player turns
+        assert state.turn_number - before <= 3
+
+
+class TestDraftWithNothingToDraftOnto:
+    """
+    A player holding no territory but a pending allotment used to produce an
+    empty legal-action list, which every driver reads as a wedged game.
+    """
+
+    def test_engine_still_offers_a_move(self, small_board):
+        from engine.constants import Phase
+
+        state = GameState.new_game(small_board, num_players=2, seed=0)
+        engine = RulesEngine(small_board, num_players=2, seed=0)
+        state.owners = [1] * small_board.num_territories
+        state.phase = Phase.DRAFT
+        state.troops_to_place = 5
+        legal = engine.legal_actions(state)
+        assert legal and all(a.is_end_phase() for a in legal)
+
+    def test_mask_is_never_empty(self, small_board):
+        from agents.action_space import RiskActionSpace
+        from engine.constants import Phase
+
+        state = GameState.new_game(small_board, num_players=2, seed=0)
+        state.owners = [1] * small_board.num_territories
+        state.phase = Phase.DRAFT
+        state.troops_to_place = 5
+        mask = RiskActionSpace(small_board).legal_mask(state)
+        assert mask.any()
+
 
 class TestSelfPlayTrainer:
     def test_falls_back_to_the_baseline_with_an_empty_pool(self, small_board):

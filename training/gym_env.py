@@ -38,6 +38,10 @@ MAX_LEGAL_ACTIONS = ACTION_SPACE_SIZE
 # single episode can never stall a training run.
 MAX_EPISODE_STEPS = 5_000
 
+# Backstop on opponent decisions served inside one step(), so no single call can
+# run away even if the opponents reach a position they cannot move out of.
+MAX_OPPONENT_STEPS_PER_STEP = 2_000
+
 
 class RiskEnv(gym.Env):
     """
@@ -53,8 +57,15 @@ class RiskEnv(gym.Env):
                  opponent_agent_cls=None,
                  gamma: float = 0.99,
                  max_episode_steps: int = MAX_EPISODE_STEPS,
+                 max_opponent_steps: int = MAX_OPPONENT_STEPS_PER_STEP,
                  render_mode: str | None = None):
         super().__init__()
+        if num_players < 2:
+            raise ValueError(f"num_players must be at least 2, got {num_players}")
+        if max_episode_steps < 1:
+            raise ValueError("max_episode_steps must be at least 1")
+        if max_opponent_steps < 1:
+            raise ValueError("max_opponent_steps must be at least 1")
         config_path = CONFIGS_DIR / f"{config_name}.json"
         if not config_path.exists():
             available = ", ".join(sorted(p.stem for p in CONFIGS_DIR.glob("*.json")))
@@ -64,6 +75,7 @@ class RiskEnv(gym.Env):
         self.board = BoardConfig.load(str(config_path))
         self.num_players = num_players
         self.max_episode_steps = max_episode_steps
+        self.max_opponent_steps = max_opponent_steps
         self.render_mode = render_mode
         self.action_encoder = RiskActionSpace(self.board)
         self._elapsed_steps = 0
@@ -121,12 +133,18 @@ class RiskEnv(gym.Env):
         win = terminated and self._engine.winner(self._state) == 0
         eliminated = self._state.eliminated[0]
 
-        if not terminated:
+        if not terminated and not eliminated:
             # Let opponents play until it's our turn again
             self._state = self._run_opponents_until_our_turn()
             terminated = self._engine.is_terminal(self._state)
             eliminated = eliminated or self._state.eliminated[0]
             win = win or (terminated and self._engine.winner(self._state) == 0)
+
+        # Being knocked out ends *our* episode. Anything the survivors do
+        # afterwards is neither observable by nor attributable to the policy,
+        # and playing it out inside one step() burns an unbounded number of
+        # engine decisions for a transition the agent cannot influence.
+        terminated = terminated or eliminated
 
         truncated = not terminated and self._elapsed_steps >= self.max_episode_steps
         reward = self._shaper.step(self._state, win=win, eliminated=eliminated,
@@ -166,15 +184,28 @@ class RiskEnv(gym.Env):
             print(self._state)
 
     def _run_opponents_until_our_turn(self) -> GameState:
-        """Step all opponent agents until it's player 0's turn (or game over)."""
+        """
+        Step opponent agents until it is player 0's turn again.
+
+        Stops early once player 0 is eliminated: from that point the loop can
+        never come back round to us, so without the check a single `step()`
+        would play the rest of the game out. The decision budget is a backstop
+        against a state no agent can move from.
+        """
         state = self._state
-        while (not self._engine.is_terminal(state) and
-               state.current_player != 0):
+        budget = self.max_opponent_steps
+        while (not self._engine.is_terminal(state)
+               and not state.eliminated[0]
+               and state.current_player != 0
+               and budget > 0):
             player = state.current_player
             agent = self._opponent_agents[player - 1]
             legal = self._engine.legal_actions(state)
+            if not legal:
+                break
             action = agent.choose_action(state, legal)
             state = self._engine.apply_action(state, action)
+            budget -= 1
         return state
 
     def _get_obs(self) -> dict:
